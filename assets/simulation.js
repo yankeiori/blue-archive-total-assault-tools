@@ -479,10 +479,34 @@
   // =========================================================================
   // コールバック: マニュアルモーダル開閉
   // =========================================================================
+  // 開いているページに対応するマニュアルの h2 見出し (nav-sim は先頭表示)
+  var MANUAL_JUMP = {
+    "nav-restart": "足切りライン最適化",
+    "nav-skill": "スキル順探索",
+  };
+
   ns.sim.toggleManualModal = function (openClicks, closeClicks) {
     var id = getTriggeredSimpleId();
-    if (id === "open-manual-btn") return { display: "flex" };
-    return { display: "none" };
+    if (id !== "open-manual-btn") return { display: "none" };
+    // モーダルが display:flex になった後でないと座標が取れないため遅延実行
+    setTimeout(function () {
+      var scroller = document.getElementById("manual-md-body");
+      if (!scroller) return;
+      scroller.scrollTop = 0;
+      var active = document.querySelector(".nav-btn.active");
+      var keyword = active ? MANUAL_JUMP[active.id] : null;
+      if (!keyword) return;
+      var heads = scroller.querySelectorAll("h2");
+      for (var i = 0; i < heads.length; i++) {
+        if (heads[i].textContent.indexOf(keyword) !== -1) {
+          scroller.scrollTop =
+            heads[i].getBoundingClientRect().top -
+            scroller.getBoundingClientRect().top - 4;
+          break;
+        }
+      }
+    }, 50);
+    return { display: "flex" };
   };
 
   // =========================================================================

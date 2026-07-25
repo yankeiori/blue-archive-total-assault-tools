@@ -523,7 +523,7 @@ def _restart_page() -> html.Div:
         [
             html.H3("足切りライン最適化", style={"marginTop": "0"}),
             html.P(
-                "「シミュレータ」で設定した攻撃列を使い、複数チェックポイントで"
+                "「ダメージシミュレータ」で設定した攻撃列を使い、複数チェックポイントで"
                 "リセットする運用の最適足切りラインを計算します。各関門は "
                 "「コスト/成功 = 期待時間/成功確率」を最小化する Bermudan 後ろ向き帰納で"
                 "決定(HP依存=積モデルにも対応)。",
@@ -917,7 +917,7 @@ def _nav_bar() -> html.Div:
     # 初期表示は「シミュレータ」ページ (= active)
     return html.Div(
         [
-            html.Button("📊 シミュレータ", id="nav-sim", n_clicks=0,
+            html.Button("📊 ダメージシミュレータ", id="nav-sim", n_clicks=0,
                         className="nav-btn active"),
             html.Button("🎯 足切りライン最適化", id="nav-restart", n_clicks=0,
                         className="nav-btn", style={"marginLeft": "6px"}),
@@ -935,7 +935,7 @@ def create_layout() -> html.Div:
         [
             html.Div(
                 [
-                    html.H1("ブルアカダメージ足切り最適化", style={"marginBottom": "0"}),
+                    html.H1("ブルアカ総力戦・大決戦ツール集", style={"marginBottom": "0"}),
                     html.Div(
                         [
                             html.Button(
@@ -1008,7 +1008,8 @@ def create_layout() -> html.Div:
                                 "marginBottom": "12px",
                             },
                         ),
-                        dcc.Markdown(_MANUAL_MD, style={"overflowY": "auto", "flex": "1"}),
+                        dcc.Markdown(_MANUAL_MD, id="manual-md-body",
+                                     style={"overflowY": "auto", "flex": "1"}),
                     ],
                     className="manual-modal-content",
                 ),

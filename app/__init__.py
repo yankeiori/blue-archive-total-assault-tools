@@ -21,7 +21,7 @@ app = Dash(
     __name__,
     assets_folder=str(_BASE_DIR / "assets"),
     suppress_callback_exceptions=True,
-    title="ブルアカダメージ足切り最適化",
+    title="ブルアカ総力戦・大決戦ツール集",
     update_title=None,
     meta_tags=[
         {"name": "viewport",
