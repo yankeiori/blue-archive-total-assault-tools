@@ -509,10 +509,13 @@ def _seg_card(idx, total, s, e, weight, end_label, success=100.0):
             ],
             style={"flex": "1", "minWidth": "0"},
         ),
-        # 中: 時間割合入力
+        # 中: 所要時間入力 (相対値でよい — 比だけが結果に影響する)
         html.Div(
             [
-                html.Label("時間割合 ", style={"fontSize": "0.8rem"}),
+                html.Label("所要時間 ",
+                           title="この区間を回すのにかかる時間。おおよその秒数でOK"
+                                 "(比だけが結果に影響します)。",
+                           style={"fontSize": "0.8rem"}),
                 dcc.Input(id={"type": "restart-seg-time", "index": s}, type="number",
                           value=weight, min=0, step=0.1,
                           style={"width": "90px", "marginLeft": "4px"}),
@@ -639,27 +642,43 @@ def _restart_disp(res, cum_to_label, last_label, D):
 
 
 def _cutoff_figure(disp, title, *, color="#d63031", ref_disp=None):
-    """足切りライン(残りダメージ)の折れ線図。ref_disp があれば最適ラインを点線で重ねる。"""
+    """足切りライン(残りダメージ)の折れ線図。ref_disp があれば最適ラインを点線で重ねる。
+
+    x軸は「足切り1, 2, …, 完走」の短い表記。カード名・区間/累積通過率は
+    ホバーで表示する。点上の常時テキストは「残りダメージ」のみ(完走点は
+    残り0固定なので省略し、y=0 の注記と重ねない)。"""
+    xs = ["完走" if is_final else f"足切り{i + 1}"
+          for i, (_lbl, _rem, _sect, _cum, is_final) in enumerate(disp)]
+
+    def hover(d):
+        return [f"{x}({lbl})<br>残りダメージ {rem:,.0f}<br>"
+                f"区間通過率 {sect:.1%} / 累積通過率 {cumr:.1%}"
+                for x, (lbl, rem, sect, cumr, _f) in zip(xs, d)]
+
     fig = go.Figure()
     if ref_disp is not None:
         fig.add_trace(go.Scatter(
-            x=[d[0] for d in ref_disp], y=[d[1] for d in ref_disp],
+            x=xs, y=[d[1] for d in ref_disp],
             mode="lines+markers", line=dict(color="#999", dash="dot"),
             marker=dict(size=8, color="#999"), name="最適ライン",
+            hovertext=hover(ref_disp), hoverinfo="text",
         ))
     fig.add_trace(go.Scatter(
-        x=[d[0] for d in disp], y=[d[1] for d in disp],
+        x=xs, y=[d[1] for d in disp],
         mode="lines+markers+text",
-        text=[f"残り{rem:,.0f}<br>区間{sect:.1%} / 累積{cumr:.1%}"
-              for (_lbl, rem, sect, cumr, _f) in disp],
-        textposition="top center", marker=dict(size=11, color=color),
+        text=["" if is_final else f"残り{rem:,.0f}"
+              for (_lbl, rem, _sect, _cum, is_final) in disp],
+        textposition="top center", cliponaxis=False,
+        marker=dict(size=11, color=color),
         line=dict(color=color),
         name="設定ライン" if ref_disp is not None else "最適足切り(残りダメージ)",
+        hovertext=hover(disp), hoverinfo="text",
     ))
     fig.add_hline(y=0, line_dash="dot", line_color="black",
-                  annotation_text="目標達成(残り0)")
+                  annotation_text="目標達成(残り0)",
+                  annotation_position="bottom right")
     fig.update_layout(
-        title=title, xaxis_title="チェックポイント(カード)",
+        title=title, xaxis_title="チェックポイント",
         yaxis_title="足切りライン(目標までの残りダメージ)",
         height=460, margin=dict(t=60),
     )
@@ -855,10 +874,10 @@ def run_restart(n_clicks, D, order, card_indices, param_values, param_ids,
     rows = [html.Tr([html.Th("チェックポイント(カード)"),
                      html.Th("最適足切り(残りダメージ)"),
                      html.Th("区間通過率"), html.Th("累積通過率")])]
-    for label, rem, sect, cumr, is_final in disp:
+    for i, (label, rem, sect, cumr, is_final) in enumerate(disp):
         style = {"background": "#fff3e0"} if is_final else {}
         rows.append(html.Tr([
-            html.Td(label),
+            html.Td(label if is_final else f"足切り{i + 1}: {label}"),
             html.Td(f"{rem:,.0f}"),
             html.Td(f"{sect:.1%}"),
             html.Td(f"{cumr:.1%}"),
@@ -878,19 +897,11 @@ def run_restart(n_clicks, D, order, card_indices, param_values, param_ids,
             style={"color": "#555", "fontSize": "0.9rem"},
         ),
         table,
-        html.Div(
-            "区間通過率 = そのチェックポイントに到達した試行のうち足切りを通過する割合"
-            "(条件付き)。累積通過率 = 開始からそこまで全関門を通過する割合。"
-            "最終行(完走/目標達成)は足切り0(残り0)で自動追加し、累積=目標達成率です。",
-            style={"color": "#777", "fontSize": "0.8rem", "marginTop": "6px"},
-        ),
     ]
     if redundant:
         children.append(html.Div(
-            "※ 区間通過率がほぼ100%の関門は、実質的に足切りしていません(手前のより"
-            "厳しい関門で既に絞られている、またはまだ見切る段階でないため)。最適ライン"
-            "は冗長な関門を手前の水準まで引き上げて単調化(残りダメージが増えないよう)"
-            "して表示しています。これらの関門は設定から外しても結果は変わりません。",
+            "※ 区間通過率がほぼ100%の関門は実質的に足切りしておらず、"
+            "設定から外しても結果は変わりません。",
             style={"color": "#b35900", "fontSize": "0.85rem", "marginTop": "8px"},
         ))
     summary = html.Div(children)
@@ -1016,11 +1027,6 @@ def update_restart_interactive(slider_values, slider_ids, cfg):
             f"(最適 = 成功率 {pct(opt_s)}・スループット {opt_g:.3e}・時短率 "
             f"{cfg['opt_speedup']:.2f}x)",
             style={"color": "#555", "fontSize": "0.88rem"},
-        ),
-        html.Div(
-            "スライダーを動かすと、その足切りライン(残りダメージ)での成功率・"
-            "スループットが再計算されます。青=あなたの設定 / 灰点線=最適。",
-            style={"color": "#777", "fontSize": "0.8rem", "marginTop": "4px"},
         ),
     ])
     return fig, summary
@@ -1360,15 +1366,35 @@ def so_run(_n, step_order,
             style={"color": "#d63031"}))
         return html.Div(header)
 
+    _legend = {"borderRadius": "4px", "padding": "1px 6px", "fontWeight": "bold",
+               "marginLeft": "6px", "whiteSpace": "nowrap"}
+    header.append(html.Div(
+        [
+            "数字 = 開始スキル画面でカードをタップする順番。",
+            html.Span("1〜3 = 手札(左から)",
+                      style={**_legend, "background": "#f1c40f", "color": "#333"}),
+            html.Span("4 = 山札の上・5 = 山札の中",
+                      style={**_legend, "background": "#35a2ff", "color": "#fff"}),
+        ],
+        style={"fontSize": "0.8rem", "color": "#666", "marginBottom": "8px"},
+    ))
+
     rows = []
     for layout, trace in results[:limit]:
         # 開始スキル設定: 1,2,3=手札(左から) / 4=山札上 / 5=山札中
         # (6枚目=山札下は残りの1枚で自動的に決まるため表示しない)
+        # 番号はゲームの開始スキル画面と同じ色分け(黄=手札 / 青=山札)。
         order_parts = []
         for pos, i in enumerate(layout[:5], start=1):
+            badge_bg, badge_fg = (("#f1c40f", "#333") if pos <= 3
+                                  else ("#35a2ff", "#fff"))
             order_parts.append(html.Span([
-                html.Span(f"{pos} ", style={"color": "#4a90d9",
-                                            "fontWeight": "bold"}),
+                html.Span(str(pos), style={
+                    "display": "inline-block", "minWidth": "18px",
+                    "textAlign": "center", "borderRadius": "4px",
+                    "background": badge_bg, "color": badge_fg,
+                    "fontWeight": "bold", "fontSize": "0.8rem",
+                    "marginRight": "4px", "padding": "0 3px"}),
                 html.Strong(disp_names[i]),
             ], style={"marginRight": "12px", "whiteSpace": "nowrap"}))
         seq = " ".join(skill_order.trace_entry_label(e, disp_names)
