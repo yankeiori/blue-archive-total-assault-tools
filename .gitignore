@@ -24,3 +24,7 @@ dist/
 
 # OCR テスト用スクショ
 shots/
+
+# 実験スクリプトの生成物
+experiments/output/
+experiments/old/
