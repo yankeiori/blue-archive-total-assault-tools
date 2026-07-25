@@ -272,14 +272,22 @@ def _segs_sum(hit_mixtures, bounds):
     return segs
 
 
-def _segs_product(ymix_per_hit, bounds):
-    """積モデル: G = -Σ ln Y 座標。増分 CF は conj(φ_S), 台は [-B, -A]。"""
+def _segs_product(ymix_per_hit, bounds, inc):
+    """積モデル: ダメージ増加方向の座標 G での増分 CF と台。
+
+    β>0 (Htil>0): S=Σ ln Y <= 0 で D は S の減少関数 → G=-S、CF は conj(φ_S)、
+    台 [-B, -A] (>=0)。β<0 (Htil<0, inc=True): S >= 0 のまま増加関数 → G=S、
+    CF は φ_S、台 [A, B] (>=0)。"""
     segs = []
     for i in range(len(bounds) - 1):
         sub = ymix_per_hit[bounds[i]:bounds[i + 1]]
-        A, B = support_bounds_hits(sub)          # S=Σ ln Y の台 (A<B<=0)
-        segs.append(_Seg(cf=lambda u, s=sub: np.conj(cf_S_hits(s, u)),
-                         s_lo=-B, s_hi=-A))       # G の台 [-B, -A] (>=0)
+        A, B = support_bounds_hits(sub)          # S=Σ ln Y の台
+        if inc:
+            segs.append(_Seg(cf=lambda u, s=sub: cf_S_hits(s, u),
+                             s_lo=A, s_hi=B))
+        else:
+            segs.append(_Seg(cf=lambda u, s=sub: np.conj(cf_S_hits(s, u)),
+                             s_lo=-B, s_hi=-A))
     return segs
 
 
@@ -353,20 +361,29 @@ def analyze_product(ymix_per_hit, hp: HPParams, checkpoints, hit_times, D,
     if isinstance(hit_times, (int, float)):
         hit_times = [float(hit_times)] * n
     Htil = hp.Htil
+    inc = Htil < 0                     # β<0: G=S、β>0: G=-S (ダメージ増加方向)
     bounds, cps = _split_bounds(n, checkpoints)
     times = _seg_times(hit_times, bounds)
     succ = _seg_success(seg_success, len(bounds) - 1)
-    eng = _CosEngine(_segs_product(ymix_per_hit, bounds))
+    eng = _CosEngine(_segs_product(ymix_per_hit, bounds, inc))
 
-    # 達成しきい値: D_n >= D ⟺ G_n >= D_thr = -ln((Htil-D)/Htil)
-    D_thr = float("inf") if D >= Htil else -math.log1p(-D / Htil)
+    # 達成しきい値: D_n >= D ⟺ G_n >= D_thr (D_thr = ±ln(1 - D/Htil))
+    if not inc and D >= Htil:
+        D_thr = float("inf")
+    else:
+        s_thr = math.log1p(-D / Htil)
+        D_thr = s_thr if inc else -s_thr
     full_pd = build_product_dist(ymix_per_hit, hp)
     base = baseline_nogate(full_pd, times, D, succ)
 
     def dmg_to_g(dmg):
         if dmg <= 0:
             return 0.0
-        return float("inf") if dmg >= Htil else -math.log1p(-dmg / Htil)
+        arg = 1.0 - dmg / Htil
+        if arg <= 0.0:
+            return float("inf")        # β>0 で dmg >= Htil (到達不能)
+        s = math.log1p(-dmg / Htil)
+        return s if inc else -s
 
     if manual_gates is None:
         g_star, gates_G = _optimize(eng, times, D_thr, succ)
@@ -378,7 +395,10 @@ def analyze_product(ymix_per_hit, hp: HPParams, checkpoints, hit_times, D,
     fwd = forward_metrics(eng, times, D_thr, gates_G, succ)
 
     def g_to_dmg(gv):
-        return float(Htil * (1.0 - math.exp(-gv))) if math.isfinite(gv) else Htil
+        if not math.isfinite(gv):
+            return Htil
+        s = gv if inc else -gv
+        return float(-Htil * math.expm1(s))
     gates_dmg = {k: g_to_dmg(gates_G[k]) for k in gates_G}
     cumG = np.cumsum([s.s_hi for s in eng.segs])
     cum_max_vals = [g_to_dmg(float(cumG[k - 1])) for k in range(1, len(cps) + 1)]

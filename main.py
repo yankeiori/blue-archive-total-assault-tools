@@ -92,6 +92,13 @@ application.clientside_callback(
     Input("hp-mode", "value"),
 )
 
+# --- HP依存モード「なし」のときカードの HP依存チェックを非表示 (CSS クラス切替) ---
+application.clientside_callback(
+    "function(m) { return m === 'on' ? '' : 'hp-mode-off'; }",
+    Output("cards-container", "className"),
+    Input("hp-mode", "value"),
+)
+
 # --- 画面スニップ (getDisplayMedia → 範囲選択 → ocr-image-store) ---
 # OCR はローカル専用。外部公開時 (ENABLE_OCR=false) は登録しない。
 if OCR_ENABLED:

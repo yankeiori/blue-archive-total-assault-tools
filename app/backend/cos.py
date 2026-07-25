@@ -520,7 +520,7 @@ class ProductDist:
     av: np.ndarray | None
     ap: np.ndarray | None
     Htil: float
-    d_max: float          # 高ダメージ端 D_max = H̃_1(1 - e^A)
+    d_max: float          # 高ダメージ端 (H̃>0: S=a、H̃<0: S=b で実現)
 
     def _cdf_S(self, s: np.ndarray) -> np.ndarray:
         s = np.asarray(s, dtype=float)
@@ -546,12 +546,19 @@ class ProductDist:
         s_of_d = np.full_like(d, np.nan)
         pos = (d >= 0.0) & (arg > 0.0)
         s_of_d[pos] = np.log1p(-d[pos] / self.Htil)
+        # D = H̃(1-e^S) は H̃>0 (β>0) で S の減少関数、H̃<0 (β<0, 瀕死特効型) で
+        # 増加関数。向きに応じて F_S を反転する。
+        inc = self.Htil < 0
         F = np.zeros_like(d)
         in_range = pos & (s_of_d >= self.a) & (s_of_d <= self.b)
         if in_range.any():
-            F[in_range] = 1.0 - self._cdf_S(s_of_d[in_range])
-        F[pos & (s_of_d < self.a)] = 1.0
-        F[~pos] = 1.0
+            Fs = self._cdf_S(s_of_d[in_range])
+            F[in_range] = Fs if inc else 1.0 - Fs
+        if inc:
+            F[pos & (s_of_d > self.b)] = 1.0        # 最大ダメージ超
+        else:
+            F[pos & (s_of_d < self.a)] = 1.0        # 最大ダメージ超
+            F[(d >= 0.0) & ~(arg > 0.0)] = 1.0      # d >= H̃ (台の右外)
         return np.clip(F, 0.0, 1.0)
 
     def pdf(self, d: np.ndarray) -> np.ndarray:
@@ -587,7 +594,8 @@ def build_product_dist(ymix_per_hit: list[list[Uniform]], hp: HPParams,
         else:
             phi = phi - atom_cf_hits(ymix_per_hit, u)
     Fk = (2.0 / L) * np.real(phi * np.exp(-1j * u * a))
-    d_max = -hp.Htil * math.expm1(a)
+    # 高ダメージ端: H̃>0 (β>0) は S=a (最小)、H̃<0 (β<0) は S=b (最大) で実現。
+    d_max = -hp.Htil * math.expm1(b if hp.Htil < 0 else a)
     return ProductDist(a, b, u, Fk, av, ap, hp.Htil, d_max)
 
 

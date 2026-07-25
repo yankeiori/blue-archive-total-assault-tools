@@ -285,13 +285,18 @@ def _result(n, cps, D, gates_dmg, fwd, base, g_star, cum_max_vals):
 # 積モデル (HP依存): 対数増分 G = -Σ ln Y (ダメージ増加方向) で和モデルに帰着
 # ---------------------------------------------------------------------------
 class _GDist:
-    """ProductDist の S=Σln Y 分布を G=-S 座標に反転し、SumDist 互換
-    (support_lo/hi, cdf(P(G<=g)), pdf) で見せるラッパー。G が大きいほど高ダメージ。"""
+    """ProductDist の S=Σln Y 分布を「ダメージ増加方向」の座標 G に写し、SumDist
+    互換 (support_lo/hi, cdf(P(G<=g)), pdf) で見せるラッパー。H̃>0 (β>0) では
+    S<=0 で D は S の減少関数なので G=-S、H̃<0 (β<0, 瀕死特効型) では S>=0 の
+    まま増加関数なので G=S。いずれも G が大きいほど高ダメージ。"""
 
     def __init__(self, pd):
         self.pd = pd
-        self.support_lo = -pd.b
-        self.support_hi = -pd.a
+        self.inc = pd.Htil < 0
+        if self.inc:
+            self.support_lo, self.support_hi = pd.a, pd.b
+        else:
+            self.support_lo, self.support_hi = -pd.b, -pd.a
 
     def _cdf_S_clamped(self, s):
         s = np.asarray(s, dtype=float)
@@ -304,14 +309,18 @@ class _GDist:
         return out
 
     def cdf(self, g):
-        return 1.0 - self._cdf_S_clamped(-np.asarray(g, dtype=float))
+        g = np.asarray(g, dtype=float)
+        if self.inc:
+            return self._cdf_S_clamped(g)
+        return 1.0 - self._cdf_S_clamped(-g)
 
     def pdf(self, g):
         g = np.asarray(g, dtype=float)
         out = np.zeros_like(g)
         m = (g >= self.support_lo) & (g <= self.support_hi)
         if m.any():
-            out[m] = np.maximum(self.pd._pdf_S(-g[m]), 0.0)
+            s = g[m] if self.inc else -g[m]
+            out[m] = np.maximum(self.pd._pdf_S(s), 0.0)
         return out
 
 
@@ -337,20 +346,28 @@ def analyze_product(ymix_per_hit, hp, checkpoints, hit_times, D, seg_success=Non
     if isinstance(hit_times, (int, float)):
         hit_times = [float(hit_times)] * n
     Htil = hp.Htil
+    inc = Htil < 0                     # β<0: G=S (ln Y >= 0)、β>0: G=-S
     seg_dists, bounds, cps = split_segments_product(ymix_per_hit, hp, checkpoints)
     times = [float(sum(hit_times[bounds[i]:bounds[i + 1]]))
              for i in range(len(bounds) - 1)]
     succ = _norm_succ(seg_success, len(bounds) - 1)
     full_pd = build_product_dist(ymix_per_hit, hp)
 
-    # 達成しきい値: D_n >= D ⟺ G_n >= D_thr = -ln((Htil-D)/Htil)
-    D_thr = float("inf") if D >= Htil else -math.log1p(-D / Htil)
+    # 達成しきい値: D_n >= D ⟺ G_n >= D_thr (D_thr = ±ln(1 - D/Htil))
+    if not inc and D >= Htil:
+        D_thr = float("inf")
+    else:
+        s_thr = math.log1p(-D / Htil)
+        D_thr = s_thr if inc else -s_thr
     base = baseline_nogate(full_pd, times, D, succ)   # ProductDist.cdf はダメージ CDF
     g_star, gates_G, _grid = optimize(seg_dists, times, D_thr, succ=succ)
     fwd = forward_metrics(seg_dists, times, D_thr, gates_G, succ=succ)
 
     def g_to_dmg(g):
-        return float(Htil * (1.0 - math.exp(-g))) if math.isfinite(g) else Htil
+        if not math.isfinite(g):
+            return Htil
+        s = g if inc else -g
+        return float(-Htil * math.expm1(s))
     gates_dmg = {k: g_to_dmg(gates_G[k]) for k in gates_G}
     cumG = np.cumsum([d.support_hi for d in seg_dists])
     cum_max_vals = [g_to_dmg(float(cumG[k - 1])) for k in range(1, len(cps) + 1)]

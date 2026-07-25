@@ -49,6 +49,7 @@
       normalHighs: [],
       critRates: [],
       evadeRates: [],
+      hpDeps: [],
     };
     for (var ii = 0; ii < indices.length; ii++) {
       var p = params[indices[ii]];
@@ -79,6 +80,7 @@
       var nb = ns.cos.rawBounds(normalMin, normalMax, stab, damageMode);
       var rcl = cb[0], rch = cb[1], rnl = nb[0], rnh = nb[1];
 
+      var dep = ns.cos.hpDepFlag(p);
       for (var h = 0; h < totalHits; h++) {
         hp.critLows.push(rcl);
         hp.critHighs.push(rch);
@@ -86,6 +88,7 @@
         hp.normalHighs.push(rnh);
         hp.critRates.push(cr);
         hp.evadeRates.push(er);
+        hp.hpDeps.push(dep);
       }
     }
     return hp;
@@ -178,8 +181,10 @@
     });
   }
 
-  // HP依存 (積モデル) の累積ダメージ MC。漸化式 H_{n+1}=H_n-(βH_n+R0)·decay(raw)。
-  function simulateProduct(hp, hpP, nSamples) {
+  // HP依存 (積/混在モデル) の累積ダメージ MC。
+  // HP依存ヒット: H_{n+1} = H_n - (βH_n + R0)·decay(raw)、通常ヒット: H_n - decay(raw)。
+  // 全ヒット HP依存なら従来の積モデル MC と同一。
+  function simulateMixed(hp, hpP, nSamples) {
     var nHits = hp.critLows.length;
     var H = parseFloat(hpP.H), H1 = parseFloat(hpP.H1), R0 = parseFloat(hpP.R0), R1 = parseFloat(hpP.R1);
     var beta = (R1 - R0) / H;
@@ -194,7 +199,8 @@
           else raw = hp.normalLows[h] + Math.random() * (hp.normalHighs[h] - hp.normalLows[h]);
           x = decay(raw);
         }
-        Hn -= (beta * Hn + R0) * x;
+        if (hp.hpDeps[h]) Hn -= (beta * Hn + R0) * x;
+        else Hn -= x;
       }
       out[s] = H1 - Hn;
     }
@@ -294,17 +300,29 @@
   // =========================================================================
   // コールバック: シミュレーション実行
   // =========================================================================
+  // 期待値と目標の縦線が近いか (ラベルが被るか) の判定。
+  // xRange があれば表示幅比で、無ければ値の相対差で判定する。
+  function markersOverlap(mean, target, xRange) {
+    if (!(target > 0)) return false;
+    var span = xRange ? xRange[1] - xRange[0]
+                      : Math.max(Math.abs(mean), Math.abs(target));
+    return span > 0 && Math.abs(mean - target) < 0.22 * span;
+  }
+
   // ダメージ分布図の縦線 (期待値・目標) shape/annotation を作る。
-  function markerShapes(mean, target) {
+  // 縦線が近いときは目標ラベルを 1 行ぶん上へずらして重なりを避ける。
+  function markerShapes(mean, target, xRange) {
     var shapes = [{ type: "line", x0: mean, x1: mean, y0: 0, y1: 1, yref: "paper",
                     line: { dash: "dash", color: "red" } }];
     var annotations = [{ x: mean, y: 1, yref: "paper", text: "期待値: " + fmt(mean),
-                         showarrow: false, yanchor: "bottom" }];
+                         showarrow: false, yanchor: "bottom", font: { color: "red" } }];
     if (target > 0) {
+      var lift = markersOverlap(mean, target, xRange) ? 16 : 0;
       shapes.push({ type: "line", x0: target, x1: target, y0: 0, y1: 1, yref: "paper",
                     line: { color: "green" } });
       annotations.push({ x: target, y: 1, yref: "paper", text: "目標: " + fmt(target),
-                         showarrow: false, yanchor: "bottom" });
+                         showarrow: false, yanchor: "bottom", yshift: lift,
+                         font: { color: "green" } });
     }
     return { shapes: shapes, annotations: annotations };
   }
@@ -318,7 +336,7 @@
     var shapes = [{ type: "line", x0: mean, x1: mean, y0: 0, y1: 1, yref: "paper",
                     line: { dash: "dash", color: "red" } }];
     var annotations = [{ x: mean, y: 1, yref: "paper", text: "期待値: " + fmt(mean),
-                         showarrow: false, yanchor: "bottom" }];
+                         showarrow: false, yanchor: "bottom", font: { color: "red" } }];
     if (target > 0) {
       // target の CDF を線形補間し、通過確率 = 100 - CDF(%) を求める。
       var cdfAt = 0;
@@ -334,11 +352,13 @@
           }
         }
       }
+      var lift = markersOverlap(mean, target, xRange) ? 16 : 0;
       shapes.push({ type: "line", x0: target, x1: target, y0: 0, y1: 1, yref: "paper",
                     line: { color: "green" } });
       annotations.push({ x: target, y: 1, yref: "paper",
                          text: "目標: " + fmt(target) + " (通過 " + ((1 - cdfAt) * 100).toFixed(2) + "%)",
-                         showarrow: false, yanchor: "bottom" });
+                         showarrow: false, yanchor: "bottom", yshift: lift,
+                         font: { color: "green" } });
     }
     return {
       data: [{ x: Array.prototype.slice.call(xs), y: y, type: "scatter", mode: "lines",
@@ -409,7 +429,12 @@
     var params = buildParams(values, ids);
     var target = parseFloat(targetDamage || 0);
     var hp = { H: hpH, H1: hpH1, R0: hpR0, R1: hpR1 };
-    var title = hpMode === "on" ? "累積ダメージ分布 (HP依存)" : "合計ダメージ分布";
+    var anyNormal = hpMode === "on" && indices.some(function (i) {
+      return params[i] && !ns.cos.hpDepFlag(params[i]);
+    });
+    var title = hpMode === "on"
+      ? (anyNormal ? "累積ダメージ分布 (HP依存+通常混在)" : "累積ダメージ分布 (HP依存)")
+      : "合計ダメージ分布";
 
     // -------- COS 法 (準厳密) --------
     if (method !== "mc") {
@@ -422,7 +447,8 @@
         600
       );
       if (!dist) throw window.dash_clientside.PreventUpdate;
-      var mk = markerShapes(dist.mean, target);
+      var xRangeCos = massRange(dist.x, dist.pdf, 0.001, 0.999);
+      var mk = markerShapes(dist.mean, target, xRangeCos);
       var passText = "";
       if (target > 0) {
         // 通過確率 = P(D >= target) = 1 - CDF(target) を grid 上で補間
@@ -430,7 +456,6 @@
         var ex = ns.cos.exceedanceProb(tbl, target);
         passText = "目標ダメージ " + fmt(target) + " の通過確率: " + ex.toFixed(2) + "% (COS法)";
       }
-      var xRangeCos = massRange(dist.x, dist.pdf, 0.001, 0.999);
       var xLabelCos = hpMode === "on" ? "累積ダメージ" : "合計ダメージ";
       var figureCos = {
         data: [{ x: dist.x, y: dist.pdf, type: "scatter", mode: "lines",
@@ -454,10 +479,11 @@
     // -------- モンテカルロ --------
     var hitParams = extractHitParams(indices, params, globalCrit, globalEvade, damageMode, globalStab);
     var totalDamage =
-      hpMode === "on" ? simulateProduct(hitParams, hp, N_SAMPLES) : simulate(hitParams, N_SAMPLES);
+      hpMode === "on" ? simulateMixed(hitParams, hp, N_SAMPLES) : simulate(hitParams, N_SAMPLES);
 
     var hist = computeHistogram(totalDamage, 200);
-    var mkm = markerShapes(hist.mean, target);
+    var xRangeMc = massRange(hist.x, hist.y, 0.001, 0.999);
+    var mkm = markerShapes(hist.mean, target, xRangeMc);
     var passTextMc = "";
     if (target > 0) {
       var passCount = 0;
@@ -466,7 +492,6 @@
       passTextMc =
         "目標ダメージ " + fmt(target) + " の通過確率: " + passRate.toFixed(2) + "% (MC)";
     }
-    var xRangeMc = massRange(hist.x, hist.y, 0.001, 0.999);
     var xLabelMc = hpMode === "on" ? "累積ダメージ" : "合計ダメージ";
     var figure = {
       data: [{ x: hist.x, y: hist.y, type: "bar", width: hist.binWidth * 0.95, name: "ダメージ分布" }],

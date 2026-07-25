@@ -28,7 +28,18 @@ _DEFAULT_PARAMS = {
     "crit_rate": None,
     "evade_rate": None,
     "enemies": 1,
+    "hp_dep": [1],
 }
+
+
+def _hp_dep_checklist_value(v) -> list:
+    """hp_dep パラメータ (Checklist の list / bool / int / None) を Checklist の
+    value へ正規化する。未指定 (None) は従来互換で「HP依存」扱い。"""
+    if v is None:
+        return [1]
+    if isinstance(v, (list, tuple)):
+        return [1] if len(v) > 0 else []
+    return [1] if v else []
 
 
 def make_damage_card(
@@ -124,13 +135,22 @@ def make_damage_card(
                     field("会心率 (%)", "crit_rate", p["crit_rate"]),
                     field("回避率 (%)", "evade_rate", p["evade_rate"]),
                     field("敵の数", "enemies", p["enemies"]),
+                    html.Div(
+                        dcc.Checklist(
+                            id={"type": "param", "param": "hp_dep", "index": index},
+                            options=[{"label": " HP依存", "value": 1}],
+                            value=_hp_dep_checklist_value(p.get("hp_dep")),
+                            style={"fontSize": "0.85rem", "whiteSpace": "nowrap"},
+                        ),
+                        className="hp-dep-box",
+                        title="このカードの与ダメージが敵の現在HPに比例するならチェック。"
+                              "チェックしたカードのダメージ欄には「HP0時のダメージ」を入力して"
+                              "ください(現在HPに応じた倍率が掛かります)。外すと通常ダメージとして扱われ、"
+                              "混在時は混在モデルで計算します。",
+                        style={"alignSelf": "end", "paddingBottom": "2px"},
+                    ),
                 ],
                 style={"display": "flex", "gap": "8px", "flexWrap": "wrap", "marginTop": "6px"},
-            ),
-            html.Div(
-                "敵の数: Hit数に掛けて総ヒット数を算出します(全体攻撃などで複数体に当たる場合に2以上)。"
-                "安定値はサイドバーの全体設定に移動しました。",
-                style={"fontSize": "0.72rem", "color": "#999", "marginTop": "4px"},
             ),
         ],
         id={"type": "card", "index": index},
@@ -388,21 +408,28 @@ def _sidebar() -> html.Div:
                 id="hp-mode",
                 options=[
                     {"label": "なし（合計＝和モデル）", "value": "off"},
-                    {"label": "あり（ミカ型＝積モデル）", "value": "on"},
+                    {"label": "あり（ミカ型。カード別に混在可）", "value": "on"},
                 ],
                 value="off",
                 style={"display": "flex", "flexDirection": "column", "gap": "4px", "marginTop": "6px"},
             ),
             html.Div(
                 [
+                    html.Div(
+                        [
+                            "⚠ HP依存カードのダメージ欄には",
+                            html.Strong("「HP0時のダメージ」"),
+                            "を入力してください。入力値に倍率(現在HPに応じて R0〜R1)が掛かります。",
+                        ],
+                        style={"fontSize": "0.8rem", "color": "#b35900",
+                               "fontWeight": "bold", "background": "#fff3e0",
+                               "border": "1px solid #f0b060", "borderRadius": "6px",
+                               "padding": "6px 8px", "marginTop": "6px"},
+                    ),
                     hp_field("敵の最大HP", "hp-H", 1000000),
                     hp_field("開始時HP", "hp-H1", 1000000),
                     hp_field("HP満タン時の倍率 (R1)", "hp-R1", 2),
                     hp_field("HP0時の倍率 (R0)", "hp-R0", 1),
-                    html.Div(
-                        "※ 倍率は現在HPに線形依存。足切り計算は和モデル固定。",
-                        style={"fontSize": "0.75rem", "color": "#888", "marginTop": "6px"},
-                    ),
                 ],
                 id="hp-params",
                 style={"display": "none", "marginTop": "4px"},
@@ -467,15 +494,15 @@ def _sidebar() -> html.Div:
 
     return html.Div(
         [
-            # 積or和モデル → スクショ → インポートエクスポート → その他
+            # 積or和モデル → スクショ → テキスト → 保存/読込 → 安定値 → 計算方式 → 生成モード
             hp_section,
             # OCR (スクショ→カード) はローカル専用。外部公開時は非表示。
             *([_ocr_panel()] if OCR_ENABLED else []),
             _text_panel(),
             _io_panel(),
+            stability_section,
             calc_section,
             damage_section,
-            stability_section,
         ],
         id="sim-sidebar",
         className="sim-sidebar",

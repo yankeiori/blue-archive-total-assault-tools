@@ -161,7 +161,22 @@
     return mix;
   }
 
-  /** 指定カード群を [{mix, count}] (カードごとに混合 + Hit数) に展開する。 */
+  /** カードの「HP依存」フラグを正規化する (Checklist の list / bool / 未指定=true)。 */
+  function hpDepFlag(p) {
+    var v = p ? p.hp_dep : null;
+    if (v == null) return true;               // 後方互換: 未指定は HP依存
+    if (Array.isArray(v)) return v.length > 0;
+    return !!v;
+  }
+
+  /** 混合を k 倍にスケールする (β=0 の退化: HP依存 → 通常ダメージ R0·x)。 */
+  function scaleMixture(mix, k) {
+    return mix.map(function (c) {
+      return { weight: c.weight, lo: c.lo * k, hi: c.hi * k };
+    });
+  }
+
+  /** 指定カード群を [{mix, count, hpDep}] (カードごとに混合 + Hit数) に展開する。 */
   function buildGroups(indices, params, globalCrit, globalEvade, damageMode, globalStab) {
     var groups = [];
     for (var ii = 0; ii < indices.length; ii++) {
@@ -175,6 +190,7 @@
       groups.push({
         mix: cardToMixture(p, globalCrit, globalEvade, damageMode, globalStab),
         count: hits * enemies,
+        hpDep: hpDepFlag(p),
       });
     }
     return groups;
@@ -595,7 +611,8 @@
     var Fk = makeFk(phi, u, a, L);
     var FkHalf = Fk.slice(); FkHalf[0] *= 0.5;
     var Htil = hp.Htil;
-    var dMax = -Htil * Math.expm1(a);
+    // 高ダメージ端: H̃>0 (β>0) は S=a (最小)、H̃<0 (β<0) は S=b (最大) で実現。
+    var dMax = -Htil * Math.expm1(Htil < 0 ? b : a);
     var dm = damageMomentsHits(ygroups, Htil);
 
     return {
@@ -611,11 +628,14 @@
       cdf: function (d) {
         if (d < 0) return 0.0;
         var arg = 1.0 - d / this.Htil;
-        if (!(arg > 0.0)) return 1.0;           // d >= Htil
+        if (!(arg > 0.0)) return 1.0;           // β>0: d >= Htil (台の右外)
         var s = Math.log1p(-d / this.Htil);
-        if (s < this.a) return 1.0;             // 高ダメージ端を超過
-        if (s > this.b) return 0.0;
-        return Math.min(1.0, Math.max(0.0, 1.0 - this._cdfS(s)));
+        // D は H̃>0 (β>0) で S の減少関数、H̃<0 (β<0) で増加関数。向きで反転。
+        var inc = this.Htil < 0;
+        if (s < this.a) return inc ? 0.0 : 1.0;
+        if (s > this.b) return inc ? 1.0 : 0.0;
+        var Fs = this._cdfS(s);
+        return Math.min(1.0, Math.max(0.0, inc ? Fs : 1.0 - Fs));
       },
       pdf: function (d) {
         if (d < 0) return 0.0;
@@ -624,6 +644,320 @@
         var s = Math.log1p(-d / this.Htil);
         if (s < this.a || s > this.b) return 0.0;
         return Math.max(0.0, cosSeries(this.FkHalf, this.a, this.du, s) / Math.abs(this.Htil - d));
+      },
+    };
+  }
+
+  // ===========================================================================
+  // 混在モデル (HP依存 + 通常ダメージ): ブロック集約グリッド DP
+  //   app/backend/mixed.py の移植。理論は docs/mixed.md。
+  //   状態 s = 累積ダメージの 1 次元 Markov。同型連続ブロックごとに厳密 CDF
+  //   (和モデル COS / 積モデル COS) をセル離散化したアフィンカーネル
+  //   {(a_i, c_i, w_i): s' = a_i s + c_i} を密度へ適用する。
+  // ===========================================================================
+  var MIXED_NODES_MIN = 33, MIXED_NODES_MAX = 512;
+  var MIXED_GRID_MIN = 2001, MIXED_GRID_MAX = 16001;
+  var MIXED_WINDOW_SIGMA = 13.0;
+
+  /** 同型連続ブロックへ分割。{kind:"z"|"y", items:[{mix|ymix, count}]}。 */
+  function mixedBlocks(groups, beta) {
+    var blocks = [];
+    for (var g = 0; g < groups.length; g++) {
+      var kind = groups[g].hpDep ? "y" : "z";
+      var entry = kind === "y"
+        ? { ymix: yMixture(groups[g].mix, beta), count: groups[g].count }
+        : { mix: groups[g].mix, count: groups[g].count };
+      if (blocks.length && blocks[blocks.length - 1].kind === kind) {
+        blocks[blocks.length - 1].items.push(entry);
+      } else {
+        blocks.push({ kind: kind, items: [entry] });
+      }
+    }
+    return blocks;
+  }
+
+  /** 累積ダメージ D の厳密な (平均, 分散)。H̃ のモーメント再帰。 */
+  function mixedMoments(groups, hpP) {
+    var m1 = hpP.Htil, m2 = hpP.Htil * hpP.Htil;
+    for (var g = 0; g < groups.length; g++) {
+      var cnt = groups[g].count, j, c;
+      if (groups[g].hpDep) {
+        var ym = yMixture(groups[g].mix, hpP.beta);
+        m1 *= Math.pow(yRawMoment(ym, 1), cnt);
+        m2 *= Math.pow(yRawMoment(ym, 2), cnt);
+      } else {
+        var z1 = 0, z2 = 0;
+        for (j = 0; j < groups[g].mix.length; j++) {
+          c = groups[g].mix[j];
+          var mid = 0.5 * (c.lo + c.hi), h = 0.5 * (c.hi - c.lo);
+          z1 += c.weight * mid;
+          z2 += c.weight * (mid * mid + h * h / 3.0);
+        }
+        for (var t = 0; t < cnt; t++) {
+          m2 = m2 - 2.0 * z1 * m1 + z2;
+          m1 = m1 - z1;
+        }
+      }
+    }
+    return { mean: hpP.Htil - m1, var: Math.max(m2 - m1 * m1, 0) };
+  }
+
+  /** 累積ダメージ D の厳密な台 [lo, hi] (H̃ の区間演算, β の符号によらない)。 */
+  function mixedSupport(groups, hpP) {
+    var hLo = hpP.Htil, hHi = hpP.Htil;
+    for (var g = 0; g < groups.length; g++) {
+      var cnt = groups[g].count, j;
+      if (groups[g].hpDep) {
+        var ym = yMixture(groups[g].mix, hpP.beta);
+        var yLo = Infinity, yHi = -Infinity;
+        for (j = 0; j < ym.length; j++) {
+          if (ym[j].lo < yLo) yLo = ym[j].lo;
+          if (ym[j].hi > yHi) yHi = ym[j].hi;
+        }
+        for (var t = 0; t < cnt; t++) {
+          var c1 = hLo * yLo, c2 = hLo * yHi, c3 = hHi * yLo, c4 = hHi * yHi;
+          hLo = Math.min(c1, c2, c3, c4);
+          hHi = Math.max(c1, c2, c3, c4);
+        }
+      } else {
+        var zLo = Infinity, zHi = -Infinity;
+        for (j = 0; j < groups[g].mix.length; j++) {
+          var m = groups[g].mix[j];
+          if (m.lo < zLo) zLo = m.lo;
+          if (m.hi > zHi) zHi = m.hi;
+        }
+        hLo -= cnt * zHi;
+        hHi -= cnt * zLo;
+      }
+    }
+    return { lo: hpP.Htil - hHi, hi: hpP.Htil - hLo };
+  }
+
+  /** セル境界 CDF から (セル中点, 質量) ノード列 (質量 0 のセルは除去)。 */
+  function cdfNodes(F, edges) {
+    var n = F.length, i;
+    var G = new Float64Array(n);
+    var run = 0;
+    for (i = 0; i < n; i++) {
+      run = Math.max(run, Math.min(1, Math.max(0, F[i])));
+      G[i] = run;
+    }
+    G[0] = 0.0; G[n - 1] = 1.0;
+    var mids = [], w = [], total = 0;
+    for (i = 0; i + 1 < n; i++) {
+      var wi = G[i + 1] - G[i];
+      if (wi > 1e-14) {
+        mids.push(0.5 * (edges[i] + edges[i + 1]));
+        w.push(wi);
+        total += wi;
+      }
+    }
+    if (!mids.length) return { mids: [edges[n >> 1]], w: [1.0] };
+    for (i = 0; i < w.length; i++) w[i] /= total;
+    return { mids: mids, w: w };
+  }
+
+  function mixedNNodes(width, step) {
+    if (!(width > 0) || !(step > 0)) return MIXED_NODES_MIN;
+    return Math.max(MIXED_NODES_MIN,
+                    Math.min(MIXED_NODES_MAX, Math.ceil(width / (2 * step))));
+  }
+
+  function zBlockBounds(items) {
+    var lo = 0, hi = 0;
+    for (var i = 0; i < items.length; i++) {
+      var mLo = Infinity, mHi = -Infinity, mix = items[i].mix;
+      for (var j = 0; j < mix.length; j++) {
+        if (mix[j].lo < mLo) mLo = mix[j].lo;
+        if (mix[j].hi > mHi) mHi = mix[j].hi;
+      }
+      lo += items[i].count * mLo;
+      hi += items[i].count * mHi;
+    }
+    return { lo: lo, hi: hi };
+  }
+
+  /** ブロックのアフィンカーネル {a, c, w} (s' = a·s + c)。原子はセルへ吸収。 */
+  function blockKernel(block, hpP, step) {
+    var n, edges, F, i, nodes;
+    if (block.kind === "z") {
+      var zb = zBlockBounds(block.items);
+      if (zb.hi - zb.lo <= 1e-9) {
+        return { a: [1.0], c: [0.5 * (zb.lo + zb.hi)], w: [1.0] };
+      }
+      var dist = buildSumDist(block.items, true);
+      n = mixedNNodes(zb.hi - zb.lo, step);
+      edges = new Float64Array(n + 1);
+      F = new Float64Array(n + 1);
+      for (i = 0; i <= n; i++) {
+        edges[i] = zb.lo + (zb.hi - zb.lo) * i / n;
+        F[i] = dist.cdf(edges[i]);
+      }
+      nodes = cdfNodes(F, edges);
+      return { a: nodes.mids.map(function () { return 1.0; }), c: nodes.mids, w: nodes.w };
+    }
+    // y ブロック: ブロック積 π = ΠY。ln π の厳密 CDF をセル離散化。
+    var sb = supportBoundsHits(block.items);
+    var A = sb.lo, B = sb.hi;
+    var dmgScale = Math.abs(hpP.Htil) * Math.abs(Math.exp(B) - Math.exp(A));
+    if (dmgScale <= 1e-9 || B - A <= 1e-12) {
+      var pi0 = Math.exp(0.5 * (A + B));
+      return { a: [pi0], c: [hpP.Htil * (1.0 - pi0)], w: [1.0] };
+    }
+    var pd = buildProductDist(block.items, hpP, true);
+    n = mixedNNodes(dmgScale, step);
+    edges = new Float64Array(n + 1);
+    F = new Float64Array(n + 1);
+    for (i = 0; i <= n; i++) {
+      edges[i] = A + (B - A) * i / n;
+      F[i] = pd._cdfS(edges[i]);
+    }
+    nodes = cdfNodes(F, edges);
+    var a = [], c = [];
+    for (i = 0; i < nodes.mids.length; i++) {
+      var pi = Math.exp(nodes.mids[i]);
+      a.push(pi);
+      c.push(hpP.Htil * (1.0 - pi));
+    }
+    return { a: a, c: c, w: nodes.w };
+  }
+
+  /** 前向き密度伝播: f'(t) = Σ_i (w_i/a_i) f((t - c_i)/a_i)。 */
+  function kernelForward(f, grid, kern) {
+    var n = grid.length, out = new Float64Array(n);
+    var g0 = grid[0], step = grid[1] - grid[0];
+    for (var i = 0; i < kern.a.length; i++) {
+      var ai = kern.a[i], ci = kern.c[i], wi = kern.w[i] / ai;
+      for (var k = 0; k < n; k++) {
+        var t = ((grid[k] - ci) / ai - g0) / step;
+        if (t < 0 || t > n - 1) continue;
+        var i0 = Math.min(Math.floor(t), n - 2);
+        var fr = t - i0;
+        out[k] += wi * (f[i0] * (1 - fr) + f[i0 + 1] * fr);
+      }
+    }
+    return out;
+  }
+
+  /** 点質量を隣接 2 格子点へ線形分配 (台形積分で質量保存)。 */
+  function depositMass(f, grid, pos, mass) {
+    var n = grid.length, step = grid[1] - grid[0];
+    if (pos <= grid[0]) { f[0] += mass / (0.5 * step); return; }
+    if (pos >= grid[n - 1]) { f[n - 1] += mass / (0.5 * step); return; }
+    var x = (pos - grid[0]) / step;
+    var i = Math.min(Math.floor(x), n - 2);
+    var t = x - i;
+    var shares = [[i, mass * (1 - t)], [i + 1, mass * t]];
+    for (var s = 0; s < 2; s++) {
+      var j = shares[s][0];
+      var weight = (j === 0 || j === n - 1) ? 0.5 * step : step;
+      f[j] += shares[s][1] / weight;
+    }
+  }
+
+  function depositAtoms(f, grid, atomCum, posOf) {
+    var av = atomCum.av, cum = atomCum.cum;
+    for (var i = 0; i < av.length; i++) {
+      depositMass(f, grid, posOf(av[i]), cum[i + 1] - cum[i]);
+    }
+  }
+
+  /** 状態 0 から最初のブロックを適用した密度 (厳密 pdf + 原子デポジット)。 */
+  function firstBlockDensity(block, hpP, grid) {
+    var f = new Float64Array(grid.length), k;
+    if (block.kind === "z") {
+      var zb = zBlockBounds(block.items);
+      if (zb.hi - zb.lo <= 1e-9) {
+        depositMass(f, grid, 0.5 * (zb.lo + zb.hi), 1.0);
+        return f;
+      }
+      var dist = buildSumDist(block.items, true);
+      for (k = 0; k < grid.length; k++) f[k] += dist.pdf(grid[k]);
+      if (dist.atomCum) {
+        depositAtoms(f, grid, dist.atomCum, function (v) { return v; });
+      }
+      return f;
+    }
+    var sb = supportBoundsHits(block.items);
+    var dmgScale = Math.abs(hpP.Htil) * Math.abs(Math.exp(sb.hi) - Math.exp(sb.lo));
+    if (dmgScale <= 1e-9 || sb.hi - sb.lo <= 1e-12) {
+      var pi0 = Math.exp(0.5 * (sb.lo + sb.hi));
+      depositMass(f, grid, hpP.Htil * (1.0 - pi0), 1.0);
+      return f;
+    }
+    var pd = buildProductDist(block.items, hpP, true);
+    for (k = 0; k < grid.length; k++) f[k] += pd.pdf(grid[k]);
+    if (pd.atomCum) {
+      depositAtoms(f, grid, pd.atomCum, function (s) {
+        return hpP.Htil * (1.0 - Math.exp(s));
+      });
+    }
+    return f;
+  }
+
+  function buildMixedDist(groups, hpP) {
+    var blocks = mixedBlocks(groups, hpP.beta);
+    var mm = mixedMoments(groups, hpP);
+    var sp = mixedSupport(groups, hpP);
+    var std = Math.sqrt(mm.var);
+    // 下端は中間状態 (累積 0 から立ち上がる) を覆うため 0。上端のみ ±13σ 窓。
+    var a = Math.min(0, sp.lo);
+    var b = std > 0 ? Math.min(sp.hi, mm.mean + MIXED_WINDOW_SIGMA * std) : sp.hi;
+    if (b - a <= 0) b = a + Math.max(1, Math.abs(a) * 1e-9);
+
+    // グリッド解像度: 最も狭い連続成分 (ダメージ規模) を ~8 点で解像
+    var wMin = Infinity, g, j;
+    for (g = 0; g < groups.length; g++) {
+      var fac = groups[g].hpDep ? Math.abs(hpP.Htil * hpP.beta) : 1.0;
+      for (j = 0; j < groups[g].mix.length; j++) {
+        var c = groups[g].mix[j];
+        if (c.hi > c.lo) {
+          var w = (c.hi - c.lo) * fac;
+          if (w > 0 && w < wMin) wMin = w;
+        }
+      }
+    }
+    var n = MIXED_GRID_MIN;
+    if (isFinite(wMin) && wMin > 0) {
+      n = Math.max(MIXED_GRID_MIN,
+                   Math.min(MIXED_GRID_MAX, Math.ceil((b - a) / (wMin / 8)) + 1));
+    }
+    var grid = new Float64Array(n);
+    var step = (b - a) / (n - 1);
+    for (j = 0; j < n; j++) grid[j] = a + j * step;
+
+    var f = firstBlockDensity(blocks[0], hpP, grid);
+    for (var bi = 1; bi < blocks.length; bi++) {
+      f = kernelForward(f, grid, blockKernel(blocks[bi], hpP, step));
+    }
+
+    var cum = new Float64Array(n);
+    for (j = 1; j < n; j++) cum[j] = cum[j - 1] + 0.5 * (f[j - 1] + f[j]) * step;
+    var total = cum[n - 1];
+    if (total > 0) {
+      for (j = 0; j < n; j++) { cum[j] /= total; f[j] /= total; }
+    }
+
+    function interpUniform(vals, x, left, right) {
+      var t = (x - a) / step;
+      if (t <= 0) return left;
+      if (t >= n - 1) return right;
+      var i0 = Math.floor(t), fr = t - i0;
+      return vals[i0] * (1 - fr) + vals[i0 + 1] * fr;
+    }
+
+    return {
+      kind: "mixed", a: a, b: b,
+      supportLo: sp.lo, supportHi: sp.hi,
+      mean: mm.mean, std: std,
+      cdf: function (x) {
+        if (x < this.supportLo) return 0.0;
+        if (x >= this.supportHi) return 1.0;
+        return Math.min(1, Math.max(0, interpUniform(cum, x, 0.0, 1.0)));
+      },
+      pdf: function (x) {
+        if (x < this.supportLo || x > this.supportHi) return 0.0;
+        return Math.max(0, interpUniform(f, x, 0.0, 0.0));
       },
     };
   }
@@ -640,7 +974,8 @@
   /**
    * カード設定から分布オブジェクトを構築する。
    * opts: {indices, params, globalCrit, globalEvade, globalStability, damageMode, hpMode, hp}
-   *   hpMode === 'on' なら積モデル (hp = {H,H1,R0,R1})、それ以外は和モデル。
+   *   hpMode === 'on' のとき、カード別の「HP依存」フラグ (hp_dep) に応じて
+   *   全依存=積モデル / 依存なし=和モデル / 混在=混在モデル (グリッドDP)。
    * 返り値は {kind, mean, std, supportLo, supportHi, dMax?, cdf(x), pdf(x)}。
    */
   ns.cos.buildDist = function (opts) {
@@ -648,11 +983,25 @@
     if (!groups.length) return null;
     if (opts.hpMode === "on") {
       var hp = hpParams(opts.hp);
-      var ygroups = groups.map(function (gr) { return { ymix: yMixture(gr.mix, hp.beta), count: gr.count }; });
-      return buildProductDist(ygroups, hp, true);
+      var anyDep = groups.some(function (g) { return g.hpDep; });
+      var allDep = groups.every(function (g) { return g.hpDep; });
+      if (hp.beta === 0) {
+        // β=0 (R1=R0): HP依存ヒットは倍率一定 R0·x の通常ダメージへ退化 → 和モデル
+        var conv = groups.map(function (g) {
+          return g.hpDep ? { mix: scaleMixture(g.mix, hp.R0), count: g.count } : g;
+        });
+        return buildSumDist(conv, true);
+      }
+      if (!anyDep) return buildSumDist(groups, true);
+      if (allDep) {
+        var ygroups = groups.map(function (gr) { return { ymix: yMixture(gr.mix, hp.beta), count: gr.count }; });
+        return buildProductDist(ygroups, hp, true);
+      }
+      return buildMixedDist(groups, hp);
     }
     return buildSumDist(groups, true);
   };
+  ns.cos.hpDepFlag = hpDepFlag;
 
   /** 分布を細グリッド上の {x, pdf, cdf} に評価する (図用)。 */
   ns.cos.distribution = function (opts, nGrid) {
@@ -660,8 +1009,8 @@
     if (!dist) return null;
     nGrid = nGrid || 600;
     var lo = dist.supportLo, hi = dist.supportHi;
-    // 和モデルは描画範囲を [mean±k·σ] ∩ サポートに絞る (台が広いと粗くなるため)
-    if (dist.kind === "sum" && dist.std > 0) {
+    // 和・混在モデルは描画範囲を [mean±k·σ] ∩ サポートに絞る (台が広いと粗くなるため)
+    if ((dist.kind === "sum" || dist.kind === "mixed") && dist.std > 0) {
       lo = Math.max(lo, dist.mean - 8 * dist.std);
       hi = Math.min(hi, dist.mean + 8 * dist.std);
     }

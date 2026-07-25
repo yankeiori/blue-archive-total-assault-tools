@@ -206,3 +206,8 @@ table.restart-cards th { background: #ffe0e0; }
 @media (max-width: 420px) {
   .dash-dropdown-wrapper:has(> .so-dd-skill) { width: 140px !important; }
 }
+
+/* HP依存モード「なし」のときはカードの HP依存チェックを非表示 */
+.hp-mode-off .hp-dep-box {
+  display: none;
+}

@@ -7,8 +7,9 @@ from dash import callback, Input, Output, State, ALL, MATCH, ctx, dcc, html
 from dash.exceptions import PreventUpdate
 
 from app import OCR_ENABLED
-from app.backend import ocr, restart_cos, skill_order
+from app.backend import ocr, restart_cos, restart_mixed, skill_order
 from app.backend.cos import HPParams, build_hit_mixtures, y_mixture
+from app.backend.mixed import card_is_hp_dep, hit_specs_from_cards, mixed_support
 from app.frontend.layout import (
     SO_N_SKILLS,
     make_damage_card,
@@ -20,7 +21,7 @@ from app.frontend.layout import (
 
 # エクスポート/インポートで扱うカードパラメータ項目とフォーマット版。
 _CARD_PARAMS = ["crit_min", "crit_max", "normal_min", "normal_max",
-                "hits", "crit_rate", "evade_rate", "enemies"]
+                "hits", "crit_rate", "evade_rate", "enemies", "hp_dep"]
 _IO_VERSION = 2
 
 
@@ -408,18 +409,22 @@ def import_input(contents):
     State({"type": "param", "param": ALL, "index": ALL}, "id"),
     State({"type": "memo", "index": ALL}, "value"),
     State({"type": "memo", "index": ALL}, "id"),
+    State("hp-mode", "value"),
     prevent_initial_call=True,
 )
 def populate_restart_table(_n1, _n2, order, card_indices, param_values, param_ids,
-                           memo_values, memo_ids):
+                           memo_values, memo_ids, hp_mode):
     ordered = _assemble_cards_ordered(order, card_indices, param_values, param_ids)
     if not ordered:
         return html.Div("カードがありません。", style={"color": "#d63031"}), [], 0
 
     memo_by = {mid["index"]: (v or "") for v, mid in zip(memo_values, memo_ids)}
 
-    header = html.Tr([html.Th("カード"), html.Th("ヒット"), html.Th("累積")])
-    rows = [header]
+    show_type = hp_mode == "on"
+    header_cells = [html.Th("カード"), html.Th("ヒット"), html.Th("累積")]
+    if show_type:
+        header_cells.append(html.Th("型"))
+    rows = [html.Tr(header_cells)]
     options = []
     cum = 0
     last = len(ordered) - 1
@@ -432,9 +437,10 @@ def populate_restart_table(_n1, _n2, order, card_indices, param_values, param_id
         if pos != last:
             options.append({"label": f"{label}(累積 {cum} ヒット目で足切り)",
                             "value": cum})
-        rows.append(html.Tr([
-            html.Td(label), html.Td(str(h)), html.Td(str(cum)),
-        ]))
+        cells = [html.Td(label), html.Td(str(h)), html.Td(str(cum))]
+        if show_type:
+            cells.append(html.Td("HP依存" if card_is_hp_dep(card) else "通常"))
+        rows.append(html.Tr(cells))
     table = html.Table(rows, className="restart-cards")
     return table, options, cum
 
@@ -744,7 +750,8 @@ def run_restart(n_clicks, D, order, card_indices, param_values, param_ids,
     if D <= 0:
         return err("目標ダメージ D を正の値で入力してください。")
 
-    if hp_mode == "on":
+    dep_flags = [card_is_hp_dep(c) for c in cards]
+    if hp_mode == "on" and any(dep_flags):
         try:
             hp = HPParams(H=float(hp_H), H1=float(hp_H1),
                           R0=float(hp_R0), R1=float(hp_R1))
@@ -752,15 +759,30 @@ def run_restart(n_clicks, D, order, card_indices, param_values, param_ids,
                 raise ValueError
         except (TypeError, ValueError):
             return err("HP依存パラメータ (H, H1, R0, R1) を正しく入力してください。")
-        if D >= hp.Htil:
-            return err(f"目標 D は H̃₁={hp.Htil:,.0f} 未満にしてください(到達不能)。")
-        ymix = [y_mixture(m, hp.beta) for m in hits]
-        res = restart_cos.analyze_product(ymix, hp, cps, hit_times, D,
-                                          seg_success=seg_success)
-        model_note = "積モデル(HP依存)"
+        if all(dep_flags):
+            if hp.Htil > 0 and D >= hp.Htil:
+                return err(f"目標 D は H̃₁={hp.Htil:,.0f} 未満にしてください(到達不能)。")
+            ymix = [y_mixture(m, hp.beta) for m in hits]
+            res = restart_cos.analyze_product(ymix, hp, cps, hit_times, D,
+                                              seg_success=seg_success)
+            model_note = "積モデル(HP依存)"
+            model_key = "product"
+        else:
+            specs = hit_specs_from_cards(cards, float(global_crit or 0),
+                                         float(global_evade or 0),
+                                         damage_mode or "post_decay")
+            d_max = mixed_support(specs, hp)[1]
+            if D >= d_max:
+                return err(f"目標 D は最大可能ダメージ {d_max:,.0f} 未満にしてください(到達不能)。")
+            res = restart_mixed.analyze_mixed(specs, hp, cps, hit_times, D,
+                                              seg_success=seg_success)
+            model_note = "混在モデル(HP依存+通常、グリッドDP)"
+            model_key = "mixed"
     else:
         res = restart_cos.analyze(hits, cps, hit_times, D, seg_success=seg_success)
-        model_note = "和モデル(HP非依存)"
+        model_note = ("和モデル(HP依存カードなし)" if hp_mode == "on"
+                      else "和モデル(HP非依存)")
+        model_key = "sum"
 
     # 最適足切りラインの単調化(表示用)。残りダメージが途中で増加する関門は、累積
     # ダメージが単調増加する以上「手前のより高い関門を通過した時点で自動的に満たされ
@@ -798,12 +820,13 @@ def run_restart(n_clicks, D, order, card_indices, param_values, param_ids,
 
     # --- リスタライン手動調整用の設定 (Store) と スライダー ---
     config = {
-        "model": "product" if hp_mode == "on" else "sum",
+        "model": model_key,
         "cards": cards, "crit": float(global_crit or 0),
         "evade": float(global_evade or 0), "damage_mode": damage_mode or "post_decay",
         "cps": cps, "hit_times": hit_times, "seg_success": seg_success, "D": D,
         "hp": ({"H": float(hp_H), "H1": float(hp_H1),
-                "R0": float(hp_R0), "R1": float(hp_R1)} if hp_mode == "on" else None),
+                "R0": float(hp_R0), "R1": float(hp_R1)}
+               if model_key in ("product", "mixed") else None),
         "cum_to_label": cum_to_label, "last_label": last_label,
         # 最適ライン (重ね描き用) と基準
         "opt_disp": disp,
@@ -951,6 +974,13 @@ def update_restart_interactive(slider_values, slider_ids, cfg):
         hp = HPParams(**cfg["hp"])
         ymix = [y_mixture(mm, hp.beta) for mm in hits]
         res = restart_cos.analyze_product(ymix, hp, cps, cfg["hit_times"], D,
+                                          manual_gates=manual_gates,
+                                          seg_success=seg_success)
+    elif cfg["model"] == "mixed":
+        hp = HPParams(**cfg["hp"])
+        specs = hit_specs_from_cards(cfg["cards"], cfg["crit"], cfg["evade"],
+                                     cfg["damage_mode"])
+        res = restart_mixed.analyze_mixed(specs, hp, cps, cfg["hit_times"], D,
                                           manual_gates=manual_gates,
                                           seg_success=seg_success)
     else:
