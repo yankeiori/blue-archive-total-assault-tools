@@ -1,11 +1,9 @@
-from bisect import bisect_left
 import os
 
 import numpy as np
 import plotly.graph_objects as go
 
 N_SAMPLES = int(os.environ.get("N_SAMPLES", 200_000))
-N_CUTOFF_SAMPLES = int(os.environ.get("N_CUTOFF_SAMPLES", 200_000))
 _CHUNK_SIZE = 50_000
 
 # ((x_min, x_max), (a, b)) -> y = a * x + b if x_min <= x < x_max
@@ -237,101 +235,3 @@ def run_simulation(
 
     return fig, pass_text
 
-
-def _simulate_cards(
-    indices: list[int],
-    params: dict[int, dict],
-    global_crit: float,
-    global_evade: float,
-    damage_mode: str,
-    n_samples: int = N_CUTOFF_SAMPLES,
-) -> np.ndarray:
-    """指定カード群の合計ダメージをシミュレーションし、ソート済み配列を返す。"""
-    rng = np.random.default_rng()
-
-    hit_params = _extract_hit_params(indices, params, global_crit, global_evade, damage_mode)
-    total = _simulate_vectorized(rng, *hit_params, n_samples)
-
-    total.sort()
-    return total
-
-
-def _build_lookup_table(sorted_samples: np.ndarray, n_points: int = 2000) -> dict:
-    """ソート済みサンプルから補間用ルックアップテーブルを構築する。"""
-    n = len(sorted_samples)
-    if n == 0:
-        return {"values": [], "min": 0.0, "max": 0.0}
-    step = max(1, n // n_points)
-    values = sorted_samples[::step].tolist()
-    return {
-        "values": values,
-        "min": float(sorted_samples[0]),
-        "max": float(sorted_samples[-1]),
-    }
-
-
-def exceedance_prob(table: dict, threshold: float) -> float:
-    """ルックアップテーブルから P(X >= threshold) を % で返す。"""
-    values = table.get("values", [])
-    if not values:
-        return 0.0
-    idx = bisect_left(values, threshold)
-    cdf = idx / len(values)
-    return round((1 - cdf) * 100, 2)
-
-
-def value_at_exceedance(table: dict, exceedance_pct: float) -> float:
-    """ルックアップテーブルから指定超過確率に対応するダメージ値を返す。"""
-    values = table.get("values", [])
-    if not values:
-        return 0.0
-    cdf = 1 - exceedance_pct / 100
-    idx = int(cdf * (len(values) - 1))
-    idx = max(0, min(idx, len(values) - 1))
-    return round(values[idx], 0)
-
-
-def compute_cutoff(
-    order: list,
-    params: dict[int, dict],
-    global_crit: float,
-    global_evade: float,
-    target_damage: float,
-    damage_mode: str,
-) -> dict:
-    """足切り位置で上側・下側の分布を計算し、初期値 (超過確率50%) で返す。"""
-    # order 内の "cutoff_0" で上下に分割
-    cutoff_pos = None
-    for i, x in enumerate(order):
-        if isinstance(x, str) and x.startswith("cutoff"):
-            cutoff_pos = i
-            break
-    if cutoff_pos is None:
-        return {}
-
-    upper_indices = [x for x in order[:cutoff_pos] if isinstance(x, int)]
-    lower_indices = [x for x in order[cutoff_pos + 1 :] if isinstance(x, int)]
-
-    upper_table = _build_lookup_table(_simulate_cards(
-        upper_indices, params, global_crit, global_evade, damage_mode
-    ))
-    lower_table = _build_lookup_table(_simulate_cards(
-        lower_indices, params, global_crit, global_evade, damage_mode
-    ))
-
-    target = float(target_damage or 0)
-
-    # 初期値: 超過確率 50%
-    e2 = 50.0
-    e1 = value_at_exceedance(upper_table, e2)
-    e3 = max(target - e1, 0)
-    e4 = exceedance_prob(lower_table, e3)
-
-    return {
-        "upper_table": upper_table,
-        "lower_table": lower_table,
-        "e1": e1,
-        "e2": e2,
-        "e3": e3,
-        "e4": e4,
-    }

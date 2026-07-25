@@ -10,14 +10,23 @@ import pytest
 
 from app.backend.simulation import (
     DAMAGE_FUNC,
-    _build_lookup_table,
-    _simulate_cards,
+    _extract_hit_params,
+    _simulate_vectorized,
     decay,
-    exceedance_prob,
     inverse_decay,
     run_simulation,
-    value_at_exceedance,
 )
+
+
+def _simulate_cards(indices, params, global_crit, global_evade, damage_mode,
+                    n_samples=200_000):
+    """テスト用: MC エンジンでソート済み合計ダメージを返す (旧 _simulate_cards 相当)。"""
+    rng = np.random.default_rng()
+    hit_params = _extract_hit_params(indices, params, global_crit, global_evade,
+                                     damage_mode)
+    total = _simulate_vectorized(rng, *hit_params, n_samples)
+    total.sort()
+    return total
 
 # ---------------------------------------------------------------------------
 # decay / inverse_decay
@@ -192,47 +201,6 @@ class TestSimulateCards:
         mean1 = np.mean(_simulate_cards([0], {0: p1}, 0, 0, "pre_decay"))
         mean2 = np.mean(_simulate_cards([0], {0: p2}, 0, 0, "pre_decay"))
         assert mean2 == pytest.approx(mean1 * 2, rel=0.05)
-
-
-# ---------------------------------------------------------------------------
-# _build_lookup_table / exceedance_prob / value_at_exceedance
-# ---------------------------------------------------------------------------
-
-
-class TestLookupTable:
-    """ルックアップテーブル関連のテスト。"""
-
-    def test_build_preserves_range(self):
-        """テーブルの min/max が元データの範囲と一致。"""
-        data = np.sort(np.random.default_rng(42).uniform(100, 1000, 10_000))
-        table = _build_lookup_table(data)
-        assert table["min"] == pytest.approx(data[0])
-        assert table["max"] == pytest.approx(data[-1])
-
-    def test_exceedance_at_min(self):
-        """最小値以下の閾値では超過確率 ≈ 100%。"""
-        data = np.sort(np.random.default_rng(42).uniform(100, 1000, 10_000))
-        table = _build_lookup_table(data)
-        assert exceedance_prob(table, 0) == pytest.approx(100, abs=1)
-
-    def test_exceedance_at_max(self):
-        """最大値以上の閾値では超過確率 ≈ 0%。"""
-        data = np.sort(np.random.default_rng(42).uniform(100, 1000, 10_000))
-        table = _build_lookup_table(data)
-        assert exceedance_prob(table, 1001) == pytest.approx(0, abs=1)
-
-    def test_value_at_50pct(self):
-        """超過確率50%の値は中央値付近。"""
-        data = np.sort(np.random.default_rng(42).uniform(0, 1000, 100_000))
-        table = _build_lookup_table(data)
-        val = value_at_exceedance(table, 50.0)
-        assert val == pytest.approx(500, abs=50)
-
-    def test_empty_table(self):
-        """空データではゼロを返す。"""
-        table = _build_lookup_table(np.array([]))
-        assert exceedance_prob(table, 100) == 0.0
-        assert value_at_exceedance(table, 50) == 0.0
 
 
 # ---------------------------------------------------------------------------

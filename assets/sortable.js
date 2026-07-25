@@ -7,7 +7,6 @@
     return Array.from(container.children).map((el) => {
       // Dash はパターンマッチ ID を JSON 文字列で DOM id に設定する
       const parsed = JSON.parse(el.id);
-      if (parsed.type === "cutoff") return "cutoff_" + parsed.index;
       return parsed.index;
     });
   }
