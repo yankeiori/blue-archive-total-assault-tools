@@ -20,6 +20,7 @@ import numpy as np
 
 from app.backend.cos import HPParams
 from app.backend.mixed import (
+    _deposit,
     block_kernel,
     blocks_from_specs,
     build_dist_auto,
@@ -38,9 +39,14 @@ from app.backend.restart import (
 )
 
 _N_GRID_BACKWARD = 3000
-_N_GRID_FORWARD = 6000
-_N_GRID_FORWARD_MAX = 40000
-_DINKELBACH_ITERS = 48
+_N_GRID_FORWARD = 12000
+_N_GRID_FORWARD_MAX = 48000
+# 二分法の g 相対精度は 2^-32 ≈ 2e-10 で、関門位置の分解能 (グリッド) より
+# 十分細かい。真の Dinkelbach 反復 (成功率/時間の分離追跡) は複雑さに見合わず不採用。
+_DINKELBACH_ITERS = 32
+# 後ろ向きは関門位置 (方策) の決定のみでよく、前向き評価が方策の指標を厳密に
+# 出すので、カーネルのセルは粗め (2×刻み) で足りる。メモリも抑えられる。
+_CELL_FACTOR_BACKWARD = 2.0
 
 
 # ---------------------------------------------------------------------------
@@ -108,13 +114,42 @@ def _optimize(seg_kernels, seg_pos, grid, times, D, succ):
 # 前向きパス: 通過率・成功率・期待時間
 # ---------------------------------------------------------------------------
 def _mass_above(f: np.ndarray, grid: np.ndarray, x: float) -> float:
-    """∫_x^∞ f (累積台形の補間)。"""
+    """∫_x^∞ f。区分線形密度のもとで厳密 (境界セルは台形の部分積分)。"""
     step = grid[1] - grid[0]
     cum = np.zeros_like(f)
     cum[1:] = np.cumsum(0.5 * (f[:-1] + f[1:]) * step)
     total = float(cum[-1])
-    below = float(np.interp(x, grid, cum, left=0.0, right=total))
-    return max(0.0, total - below)
+    if x <= grid[0]:
+        return total
+    if x >= grid[-1]:
+        return 0.0
+    i = min(int((x - grid[0]) / step), grid.size - 2)
+    fx = f[i] + (f[i + 1] - f[i]) * (x - grid[i]) / step
+    part = 0.5 * (fx + f[i + 1]) * (grid[i + 1] - x)
+    return max(0.0, total - float(cum[i + 1]) + float(part))
+
+
+def _truncate_below(f: np.ndarray, grid: np.ndarray, x: float) -> np.ndarray:
+    """密度 f を x 未満で 0 に打ち切る。x を含むセルの生存部分質量は、格子点
+    打ち切り表現で失われる分を差し引きし、部分区間の重心へデポジットして保存する
+    (関門での部分セル処理: 裾確率 1e-5 精度のため)。"""
+    out = np.where(grid >= x, f, 0.0)
+    if not (grid[0] < x < grid[-1]):
+        return out
+    step = grid[1] - grid[0]
+    i = min(int((x - grid[0]) / step), grid.size - 2)
+    x1 = grid[i + 1]
+    fx = f[i] + (f[i + 1] - f[i]) * (x - grid[i]) / step
+    true_mass = 0.5 * (fx + f[i + 1]) * (x1 - x)          # ∫_x^{x1} f (線形)
+    kept_mass = 0.5 * f[i + 1] * step                     # 打ち切り表現でのセル質量
+    delta = true_mass - kept_mass
+    if abs(delta) > 0.0:
+        denom = fx + f[i + 1]
+        centroid = (0.5 * (x + x1) if denom <= 0.0
+                    else (x * (2 * fx + f[i + 1]) + x1 * (fx + 2 * f[i + 1]))
+                    / (3.0 * denom))
+        _deposit(out, grid, min(max(centroid, x), x1), delta)
+    return out
 
 
 def forward_metrics(seg_blocks, hp, grid, times, D, gates, succ):
@@ -140,7 +175,7 @@ def forward_metrics(seg_blocks, hp, grid, times, D, gates, succ):
         p_j = clamp(q_cum * p_dmg)
         pass_rates.append(p_j)
         exp_time += times[j] * p_j
-        f = np.where(grid >= gates[j], f, 0.0)   # 関門で打ち切った生存サブ密度
+        f = _truncate_below(f, grid, gates[j])   # 関門で打ち切った生存サブ密度
         for block in seg_blocks[j]:
             f = kernel_forward(f, grid, block_kernel(block, hp, step))
         q_cum *= succ[j]
@@ -182,8 +217,8 @@ def analyze_mixed(hit_specs, hp: HPParams, checkpoints, hit_times, D,
     grid_b = np.linspace(0.0, s_hi, _N_GRID_BACKWARD)
     step_b = grid_b[1] - grid_b[0]
     if manual_gates is None:
-        seg_kernels = [[block_kernel(b, hp, step_b) for b in blks]
-                       for blks in seg_blocks]
+        seg_kernels = [[block_kernel(b, hp, step_b, _CELL_FACTOR_BACKWARD)
+                        for b in blks] for blks in seg_blocks]
         seg_pos = [[kernel_positions(grid_b, k) for k in ks]
                    for ks in seg_kernels]
         g_star, gates = _optimize(seg_kernels, seg_pos, grid_b, times, D, succ)

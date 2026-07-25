@@ -1,6 +1,9 @@
 """混在モデル (mixed.py / restart_mixed.py) の検証。
 
-正解基準は (1) モーメント再帰による厳密平均・分散、(2) Monte Carlo。
+正解基準は (1) モーメント再帰による厳密平均・分散、(2) Monte Carlo、
+(3) 2 ブロック配置 (通常全先/全後) の準厳密リファレンス (docs/mixed.md §6.1 の
+1 次元 COS 表現を Simpson 求積で合成、~1e-9)、(4) 高解像度 DP との自己収束。
+裾確率 (カットオフ率) の絶対誤差 ~1e-5 を保証するのが目的。
 docs/mixed.md の設定に倣い、HP依存ブロックと通常ブロックが交互に入る列で
 分布・足切り最適化の両方を突き合わせる。
 """
@@ -8,8 +11,15 @@ import math
 
 import numpy as np
 
-from app.backend import restart_cos
-from app.backend.cos import HPParams, build_hit_mixtures, y_mixture
+from app.backend import restart_cos, restart_mixed
+from app.backend.cos import (
+    HPParams,
+    _atom_step_cdf,
+    build_hit_mixtures,
+    build_product_dist,
+    build_sum_dist,
+    y_mixture,
+)
 from app.backend.mixed import (
     build_dist_auto,
     build_mixed_dist,
@@ -96,6 +106,120 @@ def test_mixed_with_evade_atoms_matches_mc():
     for p in (0.1, 0.5, 0.9):
         q = mc[int(p * mc.size)]
         assert abs(float(dist.cdf(np.array([q]))[0]) - p) < 7e-3, p
+
+
+# ---------------------------------------------------------------------------
+# 裾確率の高精度検証 (準厳密リファレンス / 自己収束, 目標 ~1e-5)
+# ---------------------------------------------------------------------------
+def _specs_two_block(cards, order):
+    """2 ブロック配置: normal_last = HP依存全部→通常全部、normal_first は逆。"""
+    specs = hit_specs_from_cards(cards, 60, 0, "pre_decay")
+    hp_hits = [s for s in specs if s[0]]
+    z_hits = [s for s in specs if not s[0]]
+    return hp_hits + z_hits if order == "normal_last" else z_hits + hp_hits
+
+
+def _reference_tail(specs, hp, xs, order):
+    """2 ブロック配置の P(D > x) 準厳密リファレンス (docs/mixed.md §6.1)。
+
+    normal_last:  D = D_prod + Z (独立和)。 P(D<=x) = E_Z[F_prod(x - Z)]
+    normal_first: D = H̃₁ - (H̃₁-Z)Π。      P(D<=x|z) = 1 - F_S(ln((H̃₁-x)/(H̃₁-z)))
+    Z の連続部は生の COS 級数 (pdf の負リンギング 0 クリップは質量を ~1e-6 水増し
+    するため使わない) を Simpson 求積、原子は厳密に足す。誤差 ~1e-9。"""
+    z_mixes = [m for f, m in specs if not f]
+    y_mixes = [y_mixture(m, hp.beta) for f, m in specs if f]
+    sd = build_sum_dist(z_mixes)
+    pd = build_product_dist(y_mixes, hp)
+    Htil = hp.Htil
+
+    z_lo = sum(min(u.lo for u in m) for m in z_mixes)
+    z_hi = sum(max(u.hi for u in m) for m in z_mixes)
+    nz = 20001
+    zg = np.linspace(z_lo, z_hi, nz)
+    Fk = sd.Fk.copy()
+    Fk[0] *= 0.5
+    fz = np.concatenate([
+        (Fk[None, :] * np.cos(np.outer(zg[i:i + 4000] - sd.a, sd.u))).sum(axis=1)
+        for i in range(0, nz, 4000)])
+    w = np.ones(nz)
+    w[1:-1:2], w[2:-1:2] = 4.0, 2.0
+    w *= (zg[1] - zg[0]) / 3.0
+
+    def F_cond(x, zv):
+        if order == "normal_last":
+            return pd.cdf(np.asarray(x - zv, dtype=float))
+        s = np.log(np.clip((Htil - x) / (Htil - zv), 1e-300, None))
+        Fs = pd._cdf_S(s)
+        if pd.av is not None:
+            Fs = Fs + _atom_step_cdf(pd.av, pd.ap, s)
+        return 1.0 - np.clip(Fs, 0.0, 1.0)
+
+    out = []
+    for x in xs:
+        val = float((w * fz * F_cond(x, zg)).sum())
+        if sd.av is not None:
+            val += float(sum(p * F_cond(x, np.array([v]))[0]
+                             for v, p in zip(sd.av, sd.ap)))
+        out.append(1.0 - val)
+    return np.array(out)
+
+
+def test_mixed_tail_matches_semiexact_reference():
+    """2 ブロック配置の裾確率が準厳密リファレンスと 5e-6 以内で一致する。"""
+    hp = _hp()
+    for evade in (0, 15):
+        cards = _mixed_cards()
+        for c in cards:
+            c["evade_rate"] = evade
+        for order in ("normal_last", "normal_first"):
+            specs = _specs_two_block(cards, order)
+            mean, var = mixed_moments(specs, hp)
+            sd = math.sqrt(var)
+            xs = [mean + k * sd for k in (1.0, 1.5, 2.0, 2.5, 3.0)]
+            ref = _reference_tail(specs, hp, xs, order)
+            dist = build_mixed_dist(specs, hp)
+            dp = 1.0 - dist.cdf(np.array(xs))
+            err = np.max(np.abs(dp - ref))
+            assert err < 5e-6, (order, evade, err)
+
+
+def test_mixed_tail_self_convergence():
+    """交互配置 (原子込み) の裾確率が高解像度 DP と 5e-6 以内で一致する。"""
+    hp = _hp()
+    cards = _mixed_cards()
+    for c in cards:
+        c["evade_rate"] = 15
+    specs = hit_specs_from_cards(cards, 60, 0, "pre_decay")
+    mean, var = mixed_moments(specs, hp)
+    sd = math.sqrt(var)
+    xs = np.array([mean + k * sd for k in (1.0, 1.5, 2.0, 2.5, 3.0)])
+    tail = 1.0 - build_mixed_dist(specs, hp).cdf(xs)
+    tail_fine = 1.0 - build_mixed_dist(specs, hp, n_grid=24001).cdf(xs)
+    assert np.max(np.abs(tail - tail_fine)) < 5e-6
+
+
+def test_restart_mixed_forward_self_convergence():
+    """関門固定の通過率・成功率が高解像度前向きグリッドと 8e-6 以内で一致する。"""
+    hp = _hp()
+    cards = _mixed_cards()
+    for c in cards:
+        c["evade_rate"] = 15
+    specs = hit_specs_from_cards(cards, 60, 0, "pre_decay")
+    cps = [3, 10]
+    mean, _ = mixed_moments(specs, hp)
+    D = mean * 1.05
+    manual = [mean * 0.12, mean * 0.55]
+    res = analyze_mixed(specs, hp, cps, 1.0, D, manual_gates=manual)
+    old = (restart_mixed._N_GRID_FORWARD, restart_mixed._N_GRID_FORWARD_MAX)
+    try:
+        restart_mixed._N_GRID_FORWARD = restart_mixed._N_GRID_FORWARD_MAX = 36000
+        ref = analyze_mixed(specs, hp, cps, 1.0, D, manual_gates=manual)
+    finally:
+        restart_mixed._N_GRID_FORWARD, restart_mixed._N_GRID_FORWARD_MAX = old
+    for k in range(len(cps)):
+        assert abs(res["rows"][k]["pass_rate"]
+                   - ref["rows"][k]["pass_rate"]) < 8e-6, k
+    assert abs(res["success"] - ref["success"]) < 8e-6
 
 
 def test_mixed_negative_beta_matches_mc():
@@ -243,6 +367,23 @@ def test_restart_mixed_optimize_beats_baseline_and_matches_mc():
     gates = [r["gate"] for r in res["rows"]]
     rng = np.random.default_rng(103)
     mc_pass, mc_succ = _mc_policy(specs, hp, cps, gates, D, 400_000, rng)
+    for k in range(len(cps)):
+        assert abs(res["rows"][k]["pass_rate"] - mc_pass[k]) < 1.5e-2, k
+    assert abs(res["success"] - mc_succ) < 1.5e-2
+
+
+def test_restart_mixed_negative_beta_optimize_matches_mc():
+    """β<0 (瀕死特効型) でも最適化パスが回り、最適関門の前向き指標が MC と一致。"""
+    hp = HPParams(H=1_000_000, H1=1_000_000, R0=2.0, R1=1.0)
+    specs = _specs()
+    cps = [3, 10]
+    mean, _ = mixed_moments(specs, hp)
+    D = mean * 1.1
+    res = analyze_mixed(specs, hp, cps, 1.0, D)
+    assert res["throughput"] >= res["baseline"]["g"] * 0.999
+    gates = [r["gate"] for r in res["rows"]]
+    rng = np.random.default_rng(107)
+    mc_pass, mc_succ = _mc_policy(specs, hp, cps, gates, D, 300_000, rng)
     for k in range(len(cps)):
         assert abs(res["rows"][k]["pass_rate"] - mc_pass[k]) < 1.5e-2, k
     assert abs(res["success"] - mc_succ) < 1.5e-2

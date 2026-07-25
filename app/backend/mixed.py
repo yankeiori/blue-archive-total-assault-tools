@@ -12,9 +12,12 @@
   - HP依存ブロック: 状態写像 s' = π s + H̃₁(1 - π), π = ΠY はブロック積
     (ln π の分布は積モデルの COS で厳密)
 
-各ブロックの厳密 CDF をグリッド解像度に合わせた等間隔セルで離散化した
-アフィンカーネル {(a_i, c_i, w_i): s' = a_i s + c_i} を密度/価値関数に適用する。
-更新回数はヒット数ではなくブロック数で済み、補間誤差の蓄積も同様に減る。
+各ブロックの厳密 CDF の連続部をグリッド解像度に合わせた等間隔セルで離散化し、
+純原子部 (全ヒット miss 等) は厳密位置の点ノードのまま合わせたアフィンカーネル
+{(a_i, c_i, w_i): s' = a_i s + c_i} を密度/価値関数に適用する。更新回数は
+ヒット数ではなくブロック数で済み、補間誤差の蓄積も同様に減る。既定解像度は
+裾確率 (カットオフ率) の絶対誤差 ~1e-6 台を満たすよう検証済み (tests/test_mixed.py
+の準厳密リファレンス・自己収束テスト)。
 
 平均・分散はモーメント再帰 m_p(t+1) = Σ_j C(p,j) E[a^j b^(p-j)] m_j(t) で
 厳密に計算できる (§6.3 の効率化、検証基準)。
@@ -29,6 +32,7 @@ import numpy as np
 from app.backend.cos import (
     HPParams,
     Uniform,
+    _atom_step_cdf,
     build_product_dist,
     build_sum_dist,
     expand_card_to_hit_mixture,
@@ -37,11 +41,12 @@ from app.backend.cos import (
     y_raw_moment,
 )
 
-# グリッド解像度の既定値
-_GRID_N_MIN = 2001
-_GRID_N_MAX = 24001
+# グリッド解像度の既定値 (裾確率 ~1e-5 を満たすよう検証済み: tests/test_mixed.py)
+_GRID_N_MIN = 4001
+_GRID_N_MAX = 32001
 _NODES_MIN = 33
-_NODES_MAX = 1024
+_NODES_MAX = 4096
+_CELL_FACTOR = 1.0            # セル幅 ≈ _CELL_FACTOR × グリッド刻み (前向き既定)
 _WINDOW_SIGMA = 13.0          # 分布ウィンドウ [mean ± 13σ] (COS の L=12 と同水準)
 
 
@@ -148,35 +153,49 @@ def mixed_support(specs, hp: HPParams) -> tuple[float, float]:
 # ---------------------------------------------------------------------------
 # ブロックのアフィンカーネル {(a_i, c_i, w_i)} : s' = a_i s + c_i
 # ---------------------------------------------------------------------------
-def _cdf_nodes(edge_cdf: np.ndarray, edges: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """セル境界の CDF から (セル中点, セル質量) のノード列 (質量 0 のセルは除去)。"""
-    F = np.clip(np.asarray(edge_cdf, dtype=float), 0.0, 1.0)
-    F = np.maximum.accumulate(F)
-    F[0], F[-1] = 0.0, 1.0
-    w = np.diff(F)
+def _eval_chunked(fn, xs: np.ndarray, chunk: int = 1024) -> np.ndarray:
+    """COS 系列の CDF/PDF 評価を分割して呼ぶ (点数×項数の一時配列を抑える)。"""
+    if xs.size <= chunk:
+        return fn(xs)
+    return np.concatenate([fn(xs[i:i + chunk]) for i in range(0, xs.size, chunk)])
+
+
+def _cdf_nodes(edge_cdf: np.ndarray, edges: np.ndarray,
+               total: float = 1.0) -> tuple[np.ndarray, np.ndarray]:
+    """セル境界の連続部 CDF から (セル中点, セル質量) のノード列。
+
+    total は連続部の全質量 (原子分離後は 1 - 原子質量)。質量 0 のセルは除去。
+    正規化はしない (呼び出し側で原子と合算してから行う)。"""
     mids = 0.5 * (edges[:-1] + edges[1:])
-    keep = w > 1e-14
-    w = w[keep]
-    if w.size == 0:
-        return np.array([float(edges[len(edges) // 2])]), np.array([1.0])
-    return mids[keep], w / w.sum()
+    if total <= 1e-14:
+        return mids[:0], np.empty(0)
+    F = np.clip(np.asarray(edge_cdf, dtype=float), 0.0, total)
+    F = np.maximum.accumulate(F)
+    F[0], F[-1] = 0.0, total
+    w = np.diff(F)
+    keep = w > 1e-16
+    return mids[keep], w[keep]
 
 
-def _n_nodes(feature_width: float, grid_step: float) -> int:
-    """ブロック範囲 (ダメージ規模) をグリッド刻みの ~2 倍で解像するノード数。"""
+def _n_nodes(feature_width: float, grid_step: float,
+             cell_factor: float = _CELL_FACTOR) -> int:
+    """ブロック範囲 (ダメージ規模) をセル幅 ≈ cell_factor×グリッド刻みで解像する
+    ノード数。"""
     if not (feature_width > 0) or not (grid_step > 0):
         return _NODES_MIN
-    return int(np.clip(math.ceil(feature_width / (2.0 * grid_step)),
+    return int(np.clip(math.ceil(feature_width / (cell_factor * grid_step)),
                        _NODES_MIN, _NODES_MAX))
 
 
-def block_kernel(block, hp: HPParams, grid_step: float):
+def block_kernel(block, hp: HPParams, grid_step: float,
+                 cell_factor: float = _CELL_FACTOR):
     """ブロックのアフィンカーネル (a, c, w) を返す。
 
-    z ブロック: 増分 T の厳密 CDF (SumDist, 原子込み) をセル離散化。a=1, c=T ノード。
-    y ブロック: ブロック積 π = ΠY。ln π の厳密 CDF (積モデル COS, 原子込み) を
+    z ブロック: 増分 T の厳密 CDF (SumDist) の連続部をセル離散化。a=1, c=T ノード。
+    y ブロック: ブロック積 π = ΠY。ln π の厳密 CDF (積モデル COS) の連続部を
                 セル離散化し、s' = π s + H̃₁(1-π) より a=π, c=H̃₁(1-π)。
-    原子はセルに吸収される (位置誤差 <= セル幅 ~ 2×グリッド刻み)。"""
+    純原子部 (全ヒット miss 等) はセルに吸収せず、厳密位置の点ノードとして
+    別途持つ (裾確率 1e-5 精度のため位置量子化を避ける)。"""
     kind, mixes = block
     Htil = hp.Htil if hp is not None else 0.0
     if kind == "z":
@@ -185,10 +204,18 @@ def block_kernel(block, hp: HPParams, grid_step: float):
         if hi - lo <= 1e-9:
             return (np.array([1.0]), np.array([0.5 * (lo + hi)]), np.array([1.0]))
         dist = build_sum_dist(mixes)
-        n = _n_nodes(hi - lo, grid_step)
+        n = _n_nodes(hi - lo, grid_step, cell_factor)
         edges = np.linspace(lo, hi, n + 1)
-        mids, w = _cdf_nodes(dist.cdf(edges), edges)
-        return (np.ones_like(mids), mids, w)
+        F = _eval_chunked(dist.cdf, edges)
+        atom_mass = 0.0
+        if dist.av is not None:
+            atom_mass = float(dist.ap.sum())
+            F = F - _atom_step_cdf(dist.av, dist.ap, edges)
+        c, w = _cdf_nodes(F, edges, total=1.0 - atom_mass)
+        if dist.av is not None:
+            c = np.concatenate([c, np.asarray(dist.av, dtype=float)])
+            w = np.concatenate([w, np.asarray(dist.ap, dtype=float)])
+        return (np.ones_like(c), c, w / w.sum())
     # y ブロック
     A, B = support_bounds_hits(mixes)
     dmg_scale = abs(Htil) * abs(math.exp(B) - math.exp(A))
@@ -196,11 +223,19 @@ def block_kernel(block, hp: HPParams, grid_step: float):
         pi = math.exp(0.5 * (A + B))
         return (np.array([pi]), np.array([Htil * (1.0 - pi)]), np.array([1.0]))
     pd = build_product_dist(mixes, hp)
-    n = _n_nodes(dmg_scale, grid_step)
+    n = _n_nodes(dmg_scale, grid_step, cell_factor)
     edges = np.linspace(A, B, n + 1)
-    mids, w = _cdf_nodes(pd._cdf_S(edges), edges)
-    pi = np.exp(mids)
-    return (pi, Htil * (1.0 - pi), w)
+    F = _eval_chunked(pd._cdf_S, edges)       # 原子込み → 階段を引いて連続部のみに
+    atom_mass = 0.0
+    if pd.av is not None:
+        atom_mass = float(pd.ap.sum())
+        F = F - _atom_step_cdf(pd.av, pd.ap, edges)
+    s_nodes, w = _cdf_nodes(F, edges, total=1.0 - atom_mass)
+    if pd.av is not None:
+        s_nodes = np.concatenate([s_nodes, np.asarray(pd.av, dtype=float)])
+        w = np.concatenate([w, np.asarray(pd.ap, dtype=float)])
+    pi = np.exp(s_nodes)
+    return (pi, Htil * (1.0 - pi), w / w.sum())
 
 
 # ---------------------------------------------------------------------------
@@ -267,7 +302,7 @@ def first_block_density(block, hp: HPParams, grid: np.ndarray) -> np.ndarray:
             _deposit(f, grid, 0.5 * (lo + hi), 1.0)
             return f
         dist = build_sum_dist(mixes)
-        f += dist.pdf(grid)
+        f += _eval_chunked(dist.pdf, grid)
         if dist.av is not None:
             for v, p in zip(dist.av, dist.ap):
                 _deposit(f, grid, float(v), float(p))
@@ -279,7 +314,7 @@ def first_block_density(block, hp: HPParams, grid: np.ndarray) -> np.ndarray:
         _deposit(f, grid, Htil * (1.0 - pi), 1.0)
         return f
     pd = build_product_dist(mixes, hp)
-    f += pd.pdf(grid)                     # D = H̃₁(1 - e^S) の密度 (ヤコビアン込み)
+    f += _eval_chunked(pd.pdf, grid)      # D = H̃₁(1 - e^S) の密度 (ヤコビアン込み)
     if pd.av is not None:
         for s, p in zip(pd.av, pd.ap):
             _deposit(f, grid, Htil * (1.0 - math.exp(float(s))), float(p))
@@ -336,7 +371,7 @@ def build_mixed_dist(specs, hp: HPParams, n_grid: int | None = None) -> MixedDis
         b = a + max(1.0, abs(a) * 1e-9)
 
     if n_grid is None:
-        # 最も狭い連続成分 (ダメージ規模) を ~8 点で解像する
+        # 最も狭い連続成分 (ダメージ規模) を ~16 点で解像する
         w_min = math.inf
         for is_hp, mix in specs:
             for u in mix:
@@ -345,7 +380,7 @@ def build_mixed_dist(specs, hp: HPParams, n_grid: int | None = None) -> MixedDis
                     if w > 0:
                         w_min = min(w_min, w)
         if math.isfinite(w_min) and w_min > 0:
-            n_grid = int(np.clip(math.ceil((b - a) / (w_min / 8.0)) + 1,
+            n_grid = int(np.clip(math.ceil((b - a) / (w_min / 16.0)) + 1,
                                  _GRID_N_MIN, _GRID_N_MAX))
         else:
             n_grid = _GRID_N_MIN
