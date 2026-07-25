@@ -1033,7 +1033,7 @@ def create_layout() -> html.Div:
                     html.Div(
                         [
                             _top_settings_panel(),
-                            html.Div(id="cards-container", children=[make_damage_card(0, DEFAULT_CRIT_RATE, DEFAULT_EVADE_RATE)]),
+                            html.Div(id="cards-container", children=[]),
                             html.Div(
                                 [
                                     html.Button("+ ダメージ追加", id="add-btn", n_clicks=0),
@@ -1123,9 +1123,9 @@ def create_layout() -> html.Div:
             html.Div(_skill_order_page(), id="page-skill", style={"display": "none"}),
             # 非表示 Store 群
             dcc.Store(id="drag-order", data=""),
-            dcc.Store(id="card-indices", data=[0]),
+            dcc.Store(id="card-indices", data=[]),
             dcc.Store(id="sorted-indices", data=[]),
-            dcc.Store(id="next-index", data=1),
+            dcc.Store(id="next-index", data=0),
             # スニップした画像 (data URL) を JS から受け取る
             dcc.Store(id="ocr-image-store", data=None),
             # 多段リスタ: 選択済みチェックポイント (累積ヒット数のリスト)

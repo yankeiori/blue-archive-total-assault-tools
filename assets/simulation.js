@@ -357,9 +357,13 @@
 
     var indices =
       sortedIndices && sortedIndices.length ? sortedIndices : cardIndices;
-    indices = indices.filter(function (x) {
+    indices = (indices || []).filter(function (x) {
       return typeof x === "number";
     });
+    if (!indices.length) {
+      var nu = window.dash_clientside.no_update;
+      return [nu, "⚠ カードがありません。「+ ダメージ追加」でカードを追加してください。", nu, nu, nu];
+    }
 
     var params = buildParams(values, ids);
     var target = parseFloat(targetDamage || 0);

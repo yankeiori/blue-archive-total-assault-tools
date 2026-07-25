@@ -82,6 +82,9 @@ def update_cards(
     param_values, param_ids, memo_values, memo_ids,
 ):
     trigger = ctx.triggered_id
+    # 初期状態はカード0枚のため、State が None になり得る
+    indices = indices or []
+    children = children or []
 
     if trigger == "add-btn":
         indices.append(next_idx)
@@ -95,8 +98,6 @@ def update_cards(
         if not _triggered_clicked():
             raise PreventUpdate
         remove_idx = trigger["index"]
-        if len(indices) <= 1:
-            return children, indices, next_idx, dash.no_update
         indices = [i for i in indices if i != remove_idx]
         children = [
             c for c in children
@@ -166,6 +167,8 @@ if OCR_ENABLED:
         if not parsed:
             return (*no_change, "⚠ カードを検出できませんでした。画像を確認してください。", dash.no_update)
 
+        children = children or []
+        indices = indices or []
         for card in parsed:
             children.append(make_damage_card(next_idx, params=card["params"], memo=card["memo"]))
             indices.append(next_idx)
@@ -220,6 +223,8 @@ def text_add_cards(n_clicks, text, children, indices, next_idx):
     if not parsed:
         return (*no_change, "⚠ カードを検出できませんでした。テキストを確認してください。", dash.no_update)
 
+    children = children or []
+    indices = indices or []
     for card in parsed:
         children.append(make_damage_card(next_idx, params=card["params"], memo=card["memo"]))
         indices.append(next_idx)
