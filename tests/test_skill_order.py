@@ -9,6 +9,7 @@ import pytest
 
 from app.backend.skill_order import (
     HAND_SIZE_DECISIVE,
+    default_node_budget,
     SearchBudgetExceeded,
     Step,
     different_slots,
@@ -192,6 +193,33 @@ def test_wildcard_skips_copier_original():
 def test_max_results_truncation():
     res, truncated = solve(6, set(), [Step(None)], max_results=2)
     assert truncated and len(res) == 2
+
+
+def test_stats_reports_reached_depth():
+    # 3手目で成立しなくなる手順 (B は山札を1周しないと戻らない)
+    plan = [Step(1), Step(2), Step(1)]
+    stats = {}
+    res, _ = solve(6, set(), plan, stats=stats)
+    assert not res
+    assert stats["max_depth"] == 2          # 2手目までは到達できた
+
+    stats = {}
+    res, _ = solve(6, set(), [Step(1), Step(2)], stats=stats)
+    assert res and stats["max_depth"] == 2  # 最後まで到達
+
+
+def test_default_node_budget_scales_with_plan_length():
+    assert default_node_budget([Step(0)] * 3) == 2_000_000
+    assert default_node_budget([Step(0)] * 98) == 98 * 200_000
+
+
+def test_long_plan_is_not_cut_off_by_the_budget():
+    # 手順が長いだけで打ち切られないこと (既定予算は手順長に比例)
+    plan = [Step(i % 6) for i in range(60)]
+    with pytest.raises(SearchBudgetExceeded):
+        solve(6, set(), plan, node_budget=1000)   # 明示指定はそのまま効く
+    res, _ = solve(6, set(), plan)
+    assert res
 
 
 def test_node_budget():

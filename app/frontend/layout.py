@@ -952,7 +952,8 @@ def _skill_order_page() -> html.Div:
             # --- 実行 ---
             html.Div(
                 [
-                    html.Label("表示件数上限", style=LABEL_STYLE),
+                    html.Label("表示件数上限", style=LABEL_STYLE,
+                               title="この件数(最低500件)が見つかった時点で探索を打ち切ります"),
                     dcc.Input(id="so-limit", type="number", value=60, min=1, max=1000,
                               style={"width": "90px", "margin": "0 16px 0 8px"}),
                     html.Button("探索実行", id="so-run-btn", n_clicks=0,

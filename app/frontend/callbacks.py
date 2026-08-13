@@ -22,6 +22,9 @@ from app.frontend.layout import (
     so_target_options,
 )
 
+# スキル順探索: 解を集める下限件数(表示件数がこれより少なくてもここまでは数える)
+SO_SEARCH_CAP_MIN = 500
+
 # エクスポート/インポートで扱うカードパラメータ項目とフォーマット版。
 _CARD_PARAMS = ["crit_min", "crit_max", "normal_min", "normal_max",
                 "hits", "crit_rate", "evade_rate", "enemies", "hp_dep"]
@@ -1522,10 +1525,15 @@ def so_run(_n, step_order,
             constraints.append(skill_order.different_slots(*idx0))
 
     limit = max(1, min(int(limit or 60), 1000))
+    # 探索は表示に必要な件数だけ集めて打ち切る。解が多い手順では
+    # 全件そろえるのに時間がかかる一方、表示に使われるのは先頭 limit 件だけ。
+    # (下限 500 は「実際に絞り込めている手順なら正確な件数が出る」ようにするため)
+    search_cap = max(limit, SO_SEARCH_CAP_MIN)
+    stats = {}
     try:
         results, truncated = skill_order.solve(
             n_cards, copiers, plan, constraints,
-            hand_size=hand_size, max_results=20_000)
+            hand_size=hand_size, max_results=search_cap, stats=stats)
     except skill_order.SearchBudgetExceeded:
         return _so_error(
             "探索の組合せが多すぎて打ち切りました。「指定なし」ステップを減らすか、"
@@ -1546,14 +1554,44 @@ def so_run(_n, step_order,
                     f"{'' if layouts_exact and not truncated else '以上'})",
                     style={"color": "#666", "marginLeft": "6px",
                            "fontSize": "0.85rem"}),
-            ],
+            ]
+            + ([html.Span(
+                f"※ {search_cap}件見つかった時点で打ち切りました。"
+                "正確な件数が要る場合は枠指定や制約で絞ってください。",
+                style={"color": "#888", "marginLeft": "6px",
+                       "fontSize": "0.8rem"})] if truncated else []),
             style={"marginBottom": "10px"},
         ),
     ]
     if not results:
         header.append(html.Div(
             "条件を満たす初期配置は見つかりませんでした。",
-            style={"color": "#d63031"}))
+            style={"color": "#d63031", "fontWeight": "bold"}))
+        # 探索が到達できた最深の手順を示すと原因を絞りやすい
+        reached = stats.get("max_depth", 0)
+        bad = None if reached >= len(plan) else reached + 1
+        if bad is None:
+            header.append(html.Div(
+                "手順そのものは最後まで成立します。手順間の制約が"
+                "厳しすぎる可能性があります。",
+                style={"fontSize": "0.85rem", "color": "#555"}))
+        else:
+            desc = _so_step_desc(plan[bad - 1], disp_names, hand_size)
+            memo = memos[bad - 1]
+            header.append(html.Div([
+                html.Div([
+                    f"{bad - 1}手目までは成立し、",
+                    html.Strong(f"{bad}手目「{desc}」"
+                                + (f"「{memo}」" if memo else "")),
+                    "で成立しなくなります。",
+                ]),
+                html.Div(
+                    "この手順の前で同じカードを使っている場合は、その手順に"
+                    "「ドロー」が要るか、どちらかが「◯◯(コピー)」の使用では"
+                    "ないかを確認してください。枠指定を付けている場合は"
+                    "その指定も疑ってください。",
+                    style={"color": "#888", "marginTop": "2px"}),
+            ], style={"fontSize": "0.85rem", "color": "#555"}))
         return html.Div(header)
 
     # 開始スキル設定画面のタップ順: 1..hand_size=手札(左から) / 以降=山札(上から)
