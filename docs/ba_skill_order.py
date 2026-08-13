@@ -1,141 +1,155 @@
 # -*- coding: utf-8 -*-
-"""
-ブルーアーカイブ スキル順（開始スキル設定）探索スクリプト
+"""ブルーアーカイブ スキル順(開始スキル設定)探索スクリプト
+
+Web UI と同じ探索ロジック (app/backend/skill_order.py) をコマンドラインから
+使うためのスクリプト。下部の設定を書き換えて実行する。
+
+    python docs/ba_skill_order.py
 
 モデル:
-  - カードは全6枚。うち3枚が手札(スロット1,2,3)、3枚が山札(上から順)。
-  - 初期配置(6枚の並び)が決定変数。
+  - カードは全 CARDS 枚。うち先頭 HAND_SIZE 枚が手札(スロット1..HAND_SIZE)、
+    残りが山札(上から順)。通常戦は 6枚/手札3、制約解除決戦は 10枚/手札5。
+  - 初期配置(全カードの並び)が決定変数。
   - 手札のカードのみ使用可能。
   - スロット i のカードを使うと、そのカードは山札の一番下へ行き、
     山札の一番上のカードがスロット i にドローされる。
+  - カード枚数が手札枚数に満たない場合、余った手札スロットは空欄になる。
 
-使い方: 下部の SKILLS / PLAN を書き換えて実行。
+手順に書ける要素:
+  use(name, slot=None, draw=False)   通常のスキル使用
+  wild(slot=None, draw=False)        何でもいい繋ぎの1枚
+  copy_use(name, ...)                「name(コピー)」を使用する
+  retreat(name)                      name のキャラがそこで撤退する
+
+複製スキル(リオなど)は COPIERS に名前を書き、use(複製キャラ, target=対象) の
+ように複製対象を指定する。
 """
 
-from collections import deque
-from itertools import permutations
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from app.backend import skill_order as so   # noqa: E402
 
 
-# --- 手順の指定 -------------------------------------------------------------
-# skill: 使いたいスキル名。None なら「何でもいい(捨て札/繋ぎ)」
-# slot : 使ってほしいスロット番号(1-3)。None なら「どのスロットでもいい」
-class Step:
-    def __init__(self, skill=None, slot=None):
-        self.skill = skill
-        self.slot = slot
+# --- 設定 -------------------------------------------------------------------
+# カード名。CARDS 枚ぶん先頭から使う。
+SKILLS = ["ハレ", "ヒカリ", "ノゾミ", "キサキ", "カヨコ", "ナギサ"]
 
-    def __repr__(self):
-        s = self.skill if self.skill is not None else "*"
-        p = self.slot if self.slot is not None else "*"
-        return f"{s}@{p}"
+CARDS = 6                          # カード枚数 (1〜10)
+HAND_SIZE = so.HAND_SIZE_NORMAL    # 通常戦=3 / 制約解除決戦=so.HAND_SIZE_DECISIVE
+COPIERS = []                       # 複製スキル持ちのカード名
 
 
-def _use(hand, deck, idx):
-    """スロット idx(0-2) のカードを使用した後の (hand, deck) を返す。"""
-    new_hand = list(hand)
-    new_deck = deque(deck)
-    used = new_hand[idx]
-    new_hand[idx] = new_deck.popleft()   # 山札トップをドロー
-    new_deck.append(used)                # 使ったカードは山札の底へ
-    return new_hand, new_deck
+# --- 手順の書き方ヘルパー ---------------------------------------------------
+def _idx(name):
+    try:
+        return SKILLS.index(name)
+    except ValueError:
+        raise SystemExit(f"SKILLS に '{name}' がありません")
 
 
-def _dfs(hand, deck, steps, i, trace, out):
-    if i == len(steps):
-        out.append(list(trace))
-        return
-    step = steps[i]
-    slots = [step.slot - 1] if step.slot is not None else range(3)
-    for idx in slots:
-        if step.skill is not None and hand[idx] != step.skill:
-            continue
-        nh, nd = _use(hand, deck, idx)
-        trace.append((idx + 1, hand[idx]))
-        _dfs(nh, nd, steps, i + 1, trace, out)
-        trace.pop()
+def use(name, slot=None, draw=False, target=None):
+    """通常のスキル使用。複製キャラなら target に複製対象名を指定する。"""
+    return so.Step(_idx(name), slot=slot, draw=draw,
+                   copy_target=None if target is None else _idx(target))
 
 
-# --- 手順間の制約 -----------------------------------------------------------
-# trace は [(使用スロット, 使用スキル), ...] （PLAN と同じ添字）
-def different_slots(*indices):
-    """指定した手順どうしを全て違うスロットにする制約。添字は0始まり。"""
-    def check(trace):
-        slots = [trace[i][0] for i in indices]
-        return len(set(slots)) == len(slots)
-    return check
+def copy_use(name, slot=None, draw=False):
+    """「name(コピー)」を使用する。"""
+    return so.Step(_idx(name), use_copy=True, slot=slot, draw=draw)
 
 
-def same_slot(*indices):
-    """指定した手順どうしを全て同じスロットにする制約。添字は0始まり。"""
-    def check(trace):
-        slots = [trace[i][0] for i in indices]
-        return len(set(slots)) == 1
-    return check
+def wild(slot=None, draw=False):
+    """何でもいい繋ぎの1枚。"""
+    return so.Step(None, slot=slot, draw=draw)
 
 
-def solve(skills, plan, constraints=()):
-    """条件を満たす初期配置を列挙する。
-
-    戻り値: [(初期配置tuple, [(使用スロット, 使用スキル), ...]), ...]
-    初期配置tuple = (手札1, 手札2, 手札3, 山札上, 山札中, 山札下)
-    """
-    results = []
-    for layout in permutations(skills):
-        hand = list(layout[:3])
-        deck = deque(layout[3:])
-        traces = []
-        _dfs(hand, deck, plan, 0, [], traces)
-        for t in traces:
-            if all(c(t) for c in constraints):
-                results.append((layout, t))
-    return results
+def retreat(name):
+    """name のキャラがそこで撤退する。"""
+    return so.Step(_idx(name), retreat=True)
 
 
-def report(results, plan, limit=None):
-    print(f"手順: {plan}")
-    print(f"解の数: {len(results)}")
+# 手順間の制約 (添字は PLAN の 0 始まり)
+different_slots = so.different_slots
+same_slot = so.same_slot
+
+
+# --- 出力 -------------------------------------------------------------------
+def report(results, truncated, plan, names, hand_size, limit=None):
+    plan_str = " → ".join(_step_desc(s, names, hand_size) for s in plan)
+    labels = so.slot_labels(hand_size)
+    n_layouts, exact = so.distinct_layouts(results)
+    print(f"手順: {plan_str}")
+    print(f"解の数: {len(results)}{'+' if truncated else ''}"
+          f"  (初期配置 {n_layouts} 通り"
+          f"{'' if exact and not truncated else '以上'})")
+    print(f"スロット: {' / '.join(labels)}")
     print()
     shown = results if limit is None else results[:limit]
-    for layout, trace in shown:
-        hand = " / ".join(layout[:3])
-        deck = " -> ".join(layout[3:])
-        seq = "  ".join(f"[{s}]{c}" for s, c in trace)
-        print(f"手札: {hand}   山札(上→下): {deck}")
+    for sol in shown:
+        cards = "  ".join(
+            f"{i + 1}:{names[s] if s is not None else '任意'}"
+            for i, s in enumerate(sol.layout))
+        seq = "  ".join(so.trace_entry_label(e, names, hand_size)
+                        for e in sol.trace)
+        suffix = f"  ({sol.count}通り)" if sol.count > 1 else ""
+        print(f"初期配置: {cards}{suffix}")
         print(f"    使用順: {seq}")
     if limit is not None and len(results) > limit:
         print(f"... 他 {len(results) - limit} 件")
 
 
-if __name__ == "__main__":
-    # 6枚のスキル名（好きに書き換え）
-    SKILLS = ["ハレ", "ヒカリ", "ノゾミ", "キサキ", "カヨコ", "ナギサ"]
+def _step_desc(step, names, hand_size):
+    if step.retreat:
+        return f"↩{names[step.skill]}撤退"
+    if step.skill is None:
+        s = "＊"
+    elif step.use_copy:
+        s = f"{names[step.skill]}(コピー)"
+    else:
+        s = names[step.skill]
+        if step.copy_target is not None:
+            s += f"→{names[step.copy_target]}(コピー)"
+    if step.slot is not None:
+        s += f"@{so.slot_labels(hand_size)[step.slot - 1]}"
+    if step.draw:
+        s += "+ドロー"
+    return s
 
-    # 例: 1手目に A をスロット1で、2手目に B をスロット2で、
-    #     3手目は何でもいいので1枚使い、4手目に C をスロット1で使いたい
+
+if __name__ == "__main__":
+    # 例: 6枚・手札3。1周してから最後にノゾミを左で使いたい。
     PLAN = [
-        Step("ハレ"),
-        Step("ヒカリ"),
-        Step("ノゾミ"),
-        Step("キサキ"),
-        Step("カヨコ"),
-        Step("ハレ"),
-        Step("ナギサ"),
-        Step("ヒカリ"),
-        Step("カヨコ"),
-        Step("ノゾミ"),
-        Step("キサキ"),
-        Step("ヒカリ"),
-        Step("ハレ"),
-        Step("ノゾミ"),
-        Step("ナギサ"),
-        Step("ヒカリ"),
-        Step("キサキ"),
-        Step("ノゾミ", 1),        
+        use("ハレ"),
+        use("ヒカリ"),
+        use("ノゾミ"),
+        use("キサキ"),
+        use("カヨコ"),
+        use("ハレ"),
+        use("ナギサ"),
+        use("ヒカリ"),
+        use("カヨコ"),
+        use("ノゾミ"),
+        use("キサキ"),
+        use("ヒカリ"),
+        use("ハレ"),
+        use("ノゾミ"),
+        use("ナギサ"),
+        use("ヒカリ"),
+        use("キサキ"),
+        use("ノゾミ", slot=1),
     ]
 
-    # 手順間の制約（添字は PLAN の 0 始まり）
+    # 手順間の制約(添字は PLAN の 0 始まり)
     CONSTRAINTS = [
         different_slots(2, 3),   # 3手目ノゾミ と 4手目キサキ を違うスロットに
     ]
 
-    report(solve(SKILLS, PLAN, CONSTRAINTS), PLAN, limit=60)
+    names = [SKILLS[i] if i < len(SKILLS) else f"カード{i + 1}"
+             for i in range(CARDS)]
+    results, truncated = so.solve(
+        CARDS, {_idx(c) for c in COPIERS}, PLAN, CONSTRAINTS,
+        hand_size=HAND_SIZE, max_results=20_000)
+    report(results, truncated, PLAN, names, HAND_SIZE, limit=60)

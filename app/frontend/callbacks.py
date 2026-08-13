@@ -7,15 +7,18 @@ from dash import callback, Input, Output, State, ALL, MATCH, ctx, dcc, html
 from dash.exceptions import PreventUpdate
 
 from app import OCR_ENABLED
-from app.backend import ocr, restart_cos, restart_mixed, skill_order
+from app.backend import ocr, restart_cos, restart_mixed, skill_order, tl_parse
 from app.backend.cos import HPParams, build_hit_mixtures, y_mixture
 from app.backend.mixed import card_is_hp_dep, hit_specs_from_cards, mixed_support
 from app.frontend.layout import (
-    SO_N_SKILLS,
+    SO_DEFAULT_CARDS,
+    SO_MAX_CARDS,
     make_damage_card,
     make_so_constraint,
     make_so_step,
+    so_card_count_options,
     so_skill_options,
+    so_slot_options,
     so_target_options,
 )
 
@@ -1035,14 +1038,29 @@ def update_restart_interactive(slider_values, slider_ids, cfg):
 # ---------------------------------------------------------------------------
 # スキル順探索: ヘルパー
 # ---------------------------------------------------------------------------
-def _so_names_copiers(name_values, name_ids, copier_values, copier_ids):
-    """カード名リスト(空欄はデフォルト名で補完)と複製キャラ添字集合を返す。"""
-    names = [""] * SO_N_SKILLS
+def _so_names_copiers(name_values, name_ids, copier_values, copier_ids,
+                      n_cards=SO_MAX_CARDS):
+    """カード名リスト(空欄はデフォルト名で補完)と複製キャラ添字集合を返す。
+
+    使用枚数 n_cards より後ろのカード設定行は無視する。
+    """
+    names = [""] * SO_MAX_CARDS
     for v, nid in zip(name_values, name_ids):
         names[nid["index"]] = (v or "").strip()
-    copiers = {cid["index"] for v, cid in zip(copier_values, copier_ids) if v}
-    disp_names = [nm or f"カード{i + 1}" for i, nm in enumerate(names)]
+    copiers = {cid["index"] for v, cid in zip(copier_values, copier_ids)
+               if v and cid["index"] < n_cards}
+    # 表示名は「ドアル/アル」のうち先頭だけ (残りは TL 照合用の別名)
+    disp_names = [tl_parse.display_name(nm) or f"カード{i + 1}"
+                  for i, nm in enumerate(names)]
     return names, disp_names, copiers
+
+
+def _so_int(value, default):
+    """ドロップダウンの文字列値を int に。"""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def _so_step_order_from(children):
@@ -1058,8 +1076,10 @@ def _so_step_order_from(children):
     return order
 
 
-def _so_step_desc(step, names):
+def _so_step_desc(step, names, hand_size=skill_order.HAND_SIZE_NORMAL):
     """手順1ステップの表示文字列。"""
+    if step.retreat:
+        return f"↩{names[step.skill]}撤退"
     if step.skill is None:
         s = "＊"
     elif step.use_copy:
@@ -1069,7 +1089,7 @@ def _so_step_desc(step, names):
         if step.copy_target is not None:
             s += f"→{names[step.copy_target]}(コピー)"
     if step.slot is not None:
-        s += f"@{skill_order.SLOT_LABELS[step.slot - 1]}"
+        s += f"@{skill_order.slot_labels(hand_size)[step.slot - 1]}"
     if step.draw:
         s += "+ドロー"
     return s
@@ -1080,15 +1100,78 @@ def _so_error(msg):
 
 
 # ---------------------------------------------------------------------------
+# スキル順探索: モード(手札枚数) / カード枚数
+# ---------------------------------------------------------------------------
+@callback(
+    Output("so-card-count", "options"),
+    Output("so-card-count", "value"),
+    Input("so-hand-size", "value"),
+    State("so-card-count", "value"),
+)
+def so_sync_card_count(hand_size_raw, count_raw):
+    """モードに応じてカード枚数の選択肢を切り替える(決戦は10枚まで)。"""
+    hand_size = _so_int(hand_size_raw, 3)
+    options = so_card_count_options(hand_size)
+    hi = SO_MAX_CARDS if hand_size >= 5 else SO_DEFAULT_CARDS
+    count = _so_int(count_raw, SO_DEFAULT_CARDS)
+    # モード切替時は既定枚数(通常6 / 決戦10)へ、範囲外なら丸める
+    if ctx.triggered_id == "so-hand-size":
+        count = hi
+    return options, str(min(max(count, 1), hi))
+
+
+@callback(
+    Output({"type": "so-name-row", "index": ALL}, "style"),
+    Output("so-cards-title", "children"),
+    Input("so-card-count", "value"),
+    State({"type": "so-name-row", "index": ALL}, "style"),
+    State({"type": "so-name-row", "index": ALL}, "id"),
+)
+def so_toggle_name_rows(count_raw, styles, row_ids):
+    """使用枚数を超えるカード設定行を隠す。"""
+    n_cards = _so_int(count_raw, SO_DEFAULT_CARDS)
+    out = []
+    for style, rid in zip(styles, row_ids):
+        style = dict(style or {})
+        if rid["index"] < n_cards:
+            style["display"] = "flex"
+        else:
+            style["display"] = "none"
+        out.append(style)
+    return out, f"カード設定({n_cards}枚)"
+
+
+@callback(
+    Output({"type": "so-step-slot", "index": ALL}, "options"),
+    Output({"type": "so-step-slot", "index": ALL}, "value"),
+    Input("so-hand-size", "value"),
+    State({"type": "so-step-slot", "index": ALL}, "value"),
+)
+def so_sync_slot_options(hand_size_raw, slot_values):
+    """手札枚数に合わせてスロット指定の選択肢を更新する。"""
+    hand_size = _so_int(hand_size_raw, 3)
+    options = so_slot_options(hand_size)
+    values = [v if (v == "any" or _so_int(v, 1) <= hand_size) else "any"
+              for v in slot_values]
+    return [options] * len(slot_values), values
+
+
+# ---------------------------------------------------------------------------
 # スキル順探索: 手順ステップの追加 / 削除 / 生徒選択時の自動行追加
 # ---------------------------------------------------------------------------
 @callback(
     Output("so-steps-container", "children"),
     Output("so-step-order", "data"),
     Output("so-next-step", "data"),
+    Output("so-tl-msg", "children"),
     Input("so-add-step-btn", "n_clicks"),
+    Input("so-tl-import-btn", "n_clicks"),
     Input({"type": "so-step-remove", "index": ALL}, "n_clicks"),
+    Input({"type": "so-step-up", "index": ALL}, "n_clicks"),
+    Input({"type": "so-step-down", "index": ALL}, "n_clicks"),
+    Input({"type": "so-step-insert", "index": ALL}, "n_clicks"),
     Input({"type": "so-step-skill", "index": ALL}, "value"),
+    State("so-tl-text", "value"),
     State("so-steps-container", "children"),
     State("so-next-step", "data"),
     State({"type": "so-step-skill", "index": ALL}, "id"),
@@ -1096,25 +1179,37 @@ def _so_error(msg):
     State({"type": "so-name", "index": ALL}, "id"),
     State({"type": "so-copier", "index": ALL}, "value"),
     State({"type": "so-copier", "index": ALL}, "id"),
+    State("so-card-count", "value"),
+    State("so-hand-size", "value"),
     prevent_initial_call=True,
 )
-def so_update_steps(_add, _rm, skill_values, children, next_idx, skill_ids,
-                    name_values, name_ids, copier_values, copier_ids):
+def so_update_steps(_add, _import, _rm, _up, _down, _ins, skill_values,
+                    tl_text, children, next_idx, skill_ids,
+                    name_values, name_ids, copier_values, copier_ids,
+                    count_raw, hand_size_raw):
     trigger = ctx.triggered_id
     children = children or []
+    n_cards = _so_int(count_raw, SO_DEFAULT_CARDS)
+    hand_size = _so_int(hand_size_raw, 3)
+    names, disp_names, copiers = _so_names_copiers(
+        name_values, name_ids, copier_values, copier_ids, n_cards)
+    skill_opts = so_skill_options(disp_names, copiers, n_cards)
+    target_opts = so_target_options(disp_names, copiers, n_cards)
 
-    def new_step():
-        _, disp_names, copiers = _so_names_copiers(
-            name_values, name_ids, copier_values, copier_ids)
-        return make_so_step(
-            next_idx,
-            so_skill_options(disp_names, copiers),
-            so_target_options(disp_names, copiers),
-        )
+    def new_step(index, **kw):
+        return make_so_step(index, skill_opts, target_opts,
+                            hand_size=hand_size, **kw)
 
     if trigger == "so-add-step-btn":
-        children.append(new_step())
-        return children, _so_step_order_from(children), next_idx + 1
+        children.append(new_step(next_idx))
+        return (children, _so_step_order_from(children), next_idx + 1,
+                dash.no_update)
+
+    if trigger == "so-tl-import-btn":
+        if not _triggered_clicked():
+            raise PreventUpdate
+        return _so_import_tl(tl_text, names, copiers, n_cards, next_idx,
+                             new_step, children)
 
     if not (isinstance(trigger, dict) and _triggered_clicked()):
         raise PreventUpdate
@@ -1130,17 +1225,70 @@ def so_update_steps(_add, _rm, skill_values, children, next_idx, skill_ids,
             raise PreventUpdate
         children = [c for c in children
                     if _so_step_order_from([c]) != [tidx]]
-        return children, _so_step_order_from(children), next_idx
+        return (children, _so_step_order_from(children), next_idx,
+                dash.no_update)
+
+    # 行の並べ替え / 挿入 (手順番号は CSS カウンタなので自動で振り直される)
+    if ttype in ("so-step-up", "so-step-down"):
+        pos = order.index(tidx)
+        dst = pos - 1 if ttype == "so-step-up" else pos + 1
+        if not 0 <= dst < len(order):
+            raise PreventUpdate
+        children[pos], children[dst] = children[dst], children[pos]
+        return (children, _so_step_order_from(children), next_idx,
+                dash.no_update)
+
+    if ttype == "so-step-insert":
+        children.insert(order.index(tidx) + 1, new_step(next_idx))
+        return (children, _so_step_order_from(children), next_idx + 1,
+                dash.no_update)
 
     if ttype == "so-step-skill":
         # 生徒を選択したら、最後の行が埋まっている場合に空の行を自動追加する
         skill_by = {i["index"]: v for v, i in zip(skill_values, skill_ids)}
         if skill_by.get(order[-1]):
-            children.append(new_step())
-            return children, _so_step_order_from(children), next_idx + 1
+            children.append(new_step(next_idx))
+            return (children, _so_step_order_from(children), next_idx + 1,
+                    dash.no_update)
         raise PreventUpdate
 
     raise PreventUpdate
+
+
+def _so_import_tl(text, names, copiers, n_cards, next_idx, new_step, children):
+    """TLテキストを手順行に変換する。"""
+    if not (text or "").strip():
+        return (dash.no_update, dash.no_update, dash.no_update,
+                _so_error("TLテキストが空です。"))
+    if not any((names[i] or "").strip() for i in range(n_cards)):
+        return (dash.no_update, dash.no_update, dash.no_update,
+                _so_error("先にカード設定へキャラ名を入力してください。"))
+
+    steps, warns = tl_parse.parse_timeline(text, names[:n_cards], copiers)
+    if not steps:
+        return (dash.no_update, dash.no_update, dash.no_update,
+                _so_error("カード使用を1つも読み取れませんでした。"
+                          "カード設定のキャラ名とTLの表記が一致しているか"
+                          "確認してください。"))
+
+    kind_value = {tl_parse.KIND_COPY: "c", tl_parse.KIND_RETREAT: "r"}
+    rows, idx = [], next_idx
+    for st in steps:
+        rows.append(new_step(
+            idx,
+            skill=f"{kind_value.get(st.kind, 'n')}{st.skill}",
+            target=None if st.target is None else str(st.target),
+            draw=st.draw,
+            memo=st.memo,
+        ))
+        idx += 1
+    rows.append(new_step(idx))          # 末尾の空行
+    idx += 1
+
+    msg = [html.Div(f"✅ {len(steps)}手を読み込みました。",
+                    style={"color": "#0a7c2f", "fontWeight": "bold"})]
+    msg += [html.Div(f"⚠ {w}", style={"color": "#b8860b"}) for w in warns]
+    return rows, _so_step_order_from(rows), idx, html.Div(msg)
 
 
 # ---------------------------------------------------------------------------
@@ -1154,9 +1302,12 @@ _SO_TARGET_STYLE = {"width": "130px", "flexShrink": "0"}
     Input({"type": "so-step-skill", "index": MATCH}, "value"),
     Input({"type": "so-copier", "index": ALL}, "value"),
     State({"type": "so-copier", "index": ALL}, "id"),
+    State("so-card-count", "value"),
 )
-def so_toggle_target(skill_value, copier_values, copier_ids):
-    copiers = {cid["index"] for v, cid in zip(copier_values, copier_ids) if v}
+def so_toggle_target(skill_value, copier_values, copier_ids, count_raw):
+    n_cards = _so_int(count_raw, SO_DEFAULT_CARDS)
+    copiers = {cid["index"] for v, cid in zip(copier_values, copier_ids)
+               if v and cid["index"] < n_cards}
     if (skill_value and skill_value.startswith("n")
             and int(skill_value[1:]) in copiers):
         return _SO_TARGET_STYLE
@@ -1171,18 +1322,20 @@ def so_toggle_target(skill_value, copier_values, copier_ids):
     Output({"type": "so-step-target", "index": ALL}, "options"),
     Input({"type": "so-name", "index": ALL}, "value"),
     Input({"type": "so-copier", "index": ALL}, "value"),
+    Input("so-card-count", "value"),
     State({"type": "so-name", "index": ALL}, "id"),
     State({"type": "so-copier", "index": ALL}, "id"),
     State({"type": "so-step-skill", "index": ALL}, "id"),
     prevent_initial_call=True,
 )
-def so_refresh_options(name_values, copier_values, name_ids, copier_ids,
-                       skill_dd_ids):
+def so_refresh_options(name_values, copier_values, count_raw,
+                       name_ids, copier_ids, skill_dd_ids):
+    n_cards = _so_int(count_raw, SO_DEFAULT_CARDS)
     _, disp_names, copiers = _so_names_copiers(
-        name_values, name_ids, copier_values, copier_ids)
+        name_values, name_ids, copier_values, copier_ids, n_cards)
     n = len(skill_dd_ids)
-    return ([so_skill_options(disp_names, copiers)] * n,
-            [so_target_options(disp_names, copiers)] * n)
+    return ([so_skill_options(disp_names, copiers, n_cards)] * n,
+            [so_target_options(disp_names, copiers, n_cards)] * n)
 
 
 # ---------------------------------------------------------------------------
@@ -1246,6 +1399,8 @@ def so_update_constraints(_add, _rm, children, next_idx):
     State({"type": "so-con-steps", "index": ALL}, "value"),
     State({"type": "so-con-steps", "index": ALL}, "id"),
     State("so-limit", "value"),
+    State("so-card-count", "value"),
+    State("so-hand-size", "value"),
     prevent_initial_call=True,
 )
 def so_run(_n, step_order,
@@ -1254,9 +1409,11 @@ def so_run(_n, step_order,
            slot_values, slot_ids, draw_values, draw_ids,
            memo_values, memo_ids,
            con_types, con_type_ids, con_steps, con_step_ids,
-           limit):
+           limit, count_raw, hand_size_raw):
+    n_cards = _so_int(count_raw, SO_DEFAULT_CARDS)
+    hand_size = _so_int(hand_size_raw, skill_order.HAND_SIZE_NORMAL)
     _, disp_names, copiers = _so_names_copiers(
-        name_values, name_ids, copier_values, copier_ids)
+        name_values, name_ids, copier_values, copier_ids, n_cards)
 
     # ステップ属性を index → 値 の辞書に集約し、表示順 (step_order) で組み立てる
     skill_by = {i["index"]: v for v, i in zip(skill_values, skill_ids)}
@@ -1274,26 +1431,49 @@ def so_run(_n, step_order,
 
     plan = []
     memos = []
+    retreat_steps = set()      # 撤退ステップの手順番号(1始まり)
+    retreated = set()
     for pos, sidx in enumerate(step_order, start=1):
         raw = skill_by[sidx]
         memos.append(memo_by.get(sidx, ""))
         slot_raw = slot_by.get(sidx) or "any"
         slot = int(slot_raw) if slot_raw != "any" else None
+        if slot is not None and slot > hand_size:
+            slot = None
         draw = draw_by.get(sidx, False)
 
         if raw == "any":
             plan.append(skill_order.Step(None, slot=slot, draw=draw))
             continue
 
+        if raw.startswith("r"):
+            skill = int(raw[1:])
+            if skill >= n_cards:
+                return _so_error(f"手順{pos}: 使用しないカードが指定されています。")
+            if skill in retreated:
+                return _so_error(
+                    f"手順{pos}: {disp_names[skill]} は既に撤退しています。")
+            retreated.add(skill)
+            retreat_steps.add(pos)
+            plan.append(skill_order.Step(skill, retreat=True))
+            continue
+
         use_copy = raw.startswith("c")
         skill = int(raw[1:])
+        if skill >= n_cards:
+            return _so_error(f"手順{pos}: 使用しないカードが指定されています。")
         if use_copy:
+            # コピー札は複製元が撤退しない限り残るので、複製対象の撤退は問わない
             if skill in copiers:
                 return _so_error(
                     f"手順{pos}: 複製スキル自身のコピーは指定できません。")
             plan.append(skill_order.Step(
                 skill, use_copy=True, slot=slot, draw=draw))
             continue
+
+        if skill in retreated:
+            return _so_error(
+                f"手順{pos}: {disp_names[skill]} は撤退済みなので使用できません。")
 
         target = None
         if skill in copiers:
@@ -1303,8 +1483,12 @@ def so_run(_n, step_order,
                     f"手順{pos}: {disp_names[skill]} は複製スキルです。"
                     "複製対象を選択してください。")
             target = int(traw)
-            if target == skill or target in copiers:
+            if target >= n_cards or target == skill or target in copiers:
                 return _so_error(f"手順{pos}: 複製対象が不正です。")
+            if target in retreated:
+                return _so_error(
+                    f"手順{pos}: {disp_names[target]} は撤退済みなので"
+                    "複製できません。")
         plan.append(skill_order.Step(
             skill, copy_target=target, slot=slot, draw=draw))
 
@@ -1327,6 +1511,10 @@ def so_run(_n, step_order,
         if bad:
             return _so_error(f"制約「{text}」: 手順番号 {bad} が範囲外です"
                              f"(1〜{len(plan)})。")
+        bad = [x for x in nums if x in retreat_steps]
+        if bad:
+            return _so_error(f"制約「{text}」: 手順番号 {bad} は撤退ステップなので"
+                             "スロット制約の対象にできません。")
         idx0 = [x - 1 for x in nums]
         if ctype == "same":
             constraints.append(skill_order.same_slot(*idx0))
@@ -1336,14 +1524,16 @@ def so_run(_n, step_order,
     limit = max(1, min(int(limit or 60), 1000))
     try:
         results, truncated = skill_order.solve(
-            SO_N_SKILLS, copiers, plan, constraints, max_results=20_000)
+            n_cards, copiers, plan, constraints,
+            hand_size=hand_size, max_results=20_000)
     except skill_order.SearchBudgetExceeded:
         return _so_error(
             "探索の組合せが多すぎて打ち切りました。「指定なし」ステップを減らすか、"
             "スロット指定を追加して絞り込んでください。")
 
+    n_layouts, layouts_exact = skill_order.distinct_layouts(results)
     plan_str = " → ".join(
-        _so_step_desc(s, disp_names) + (f"「{m}」" if m else "")
+        _so_step_desc(s, disp_names, hand_size) + (f"「{m}」" if m else "")
         for s, m in zip(plan, memos))
     header = [
         html.Div([html.Strong("手順: "), plan_str],
@@ -1352,8 +1542,8 @@ def so_run(_n, step_order,
             [
                 html.Strong(f"解の数: {len(results)}{'+' if truncated else ''}"),
                 html.Span(
-                    f"(初期配置 {len({r[0] for r in results})} 通り"
-                    f"{'+' if truncated else ''})",
+                    f"(初期配置 {n_layouts} 通り"
+                    f"{'' if layouts_exact and not truncated else '以上'})",
                     style={"color": "#666", "marginLeft": "6px",
                            "fontSize": "0.85rem"}),
             ],
@@ -1366,27 +1556,36 @@ def so_run(_n, step_order,
             style={"color": "#d63031"}))
         return html.Div(header)
 
+    # 開始スキル設定画面のタップ順: 1..hand_size=手札(左から) / 以降=山札(上から)
+    # (最後の1枚は残りで自動的に決まるため表示しない)
+    n_shown = max(1, n_cards - 1)
     _legend = {"borderRadius": "4px", "padding": "1px 6px", "fontWeight": "bold",
                "marginLeft": "6px", "whiteSpace": "nowrap"}
+    def _range_label(lo, hi):
+        return f"{lo} = " if lo == hi else f"{lo}〜{hi} = "
+
+    legend = ["数字 = 開始スキル画面でカードをタップする順番。"]
+    legend.append(html.Span(
+        _range_label(1, min(n_shown, hand_size)) + "手札(左から)",
+        style={**_legend, "background": "#f1c40f", "color": "#333"}))
+    if n_shown > hand_size:
+        legend.append(html.Span(
+            _range_label(hand_size + 1, n_shown) + "山札(上から)",
+            style={**_legend, "background": "#35a2ff", "color": "#fff"}))
+    legend.append(html.Span("「任意」= 残りのどのカードでもよい",
+                            style={**_legend, "background": "#ddd",
+                                   "color": "#555"}))
     header.append(html.Div(
-        [
-            "数字 = 開始スキル画面でカードをタップする順番。",
-            html.Span("1〜3 = 手札(左から)",
-                      style={**_legend, "background": "#f1c40f", "color": "#333"}),
-            html.Span("4 = 山札の上・5 = 山札の中",
-                      style={**_legend, "background": "#35a2ff", "color": "#fff"}),
-        ],
+        legend,
         style={"fontSize": "0.8rem", "color": "#666", "marginBottom": "8px"},
     ))
 
     rows = []
-    for layout, trace in results[:limit]:
-        # 開始スキル設定: 1,2,3=手札(左から) / 4=山札上 / 5=山札中
-        # (6枚目=山札下は残りの1枚で自動的に決まるため表示しない)
+    for sol in results[:limit]:
         # 番号はゲームの開始スキル画面と同じ色分け(黄=手札 / 青=山札)。
         order_parts = []
-        for pos, i in enumerate(layout[:5], start=1):
-            badge_bg, badge_fg = (("#f1c40f", "#333") if pos <= 3
+        for pos, i in enumerate(sol.layout[:n_shown], start=1):
+            badge_bg, badge_fg = (("#f1c40f", "#333") if pos <= hand_size
                                   else ("#35a2ff", "#fff"))
             order_parts.append(html.Span([
                 html.Span(str(pos), style={
@@ -1395,16 +1594,27 @@ def so_run(_n, step_order,
                     "background": badge_bg, "color": badge_fg,
                     "fontWeight": "bold", "fontSize": "0.8rem",
                     "marginRight": "4px", "padding": "0 3px"}),
-                html.Strong(disp_names[i]),
+                (html.Strong(disp_names[i]) if i is not None
+                 else html.Span("任意", style={"color": "#999"})),
             ], style={"marginRight": "12px", "whiteSpace": "nowrap"}))
-        seq = " ".join(skill_order.trace_entry_label(e, disp_names)
-                       for e in trace)
+        if sol.count > 1:
+            order_parts.append(html.Span(
+                f"({sol.count}通り)",
+                style={"color": "#999", "fontSize": "0.8rem"}))
+        seq = " ".join(
+            skill_order.trace_entry_label(e, disp_names, hand_size)
+            for e in sol.trace)
         rows.append(html.Div(
             [
                 html.Div(order_parts),
-                html.Div(f"使用順: {seq}",
-                         style={"fontSize": "0.85rem", "color": "#555",
-                                "marginTop": "2px"}),
+                # 手順が長いと一覧が読みにくいので、使用順は畳んでおく
+                html.Details([
+                    html.Summary("使用順", style={"cursor": "pointer",
+                                                 "fontSize": "0.8rem",
+                                                 "color": "#888"}),
+                    html.Div(seq, style={"fontSize": "0.85rem",
+                                         "color": "#555"}),
+                ], style={"marginTop": "2px"}),
             ],
             style={"border": "1px solid #e0e0e0", "borderRadius": "6px",
                    "padding": "8px 10px", "marginBottom": "6px",

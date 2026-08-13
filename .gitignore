@@ -28,3 +28,6 @@ shots/
 # 実験スクリプトの生成物
 experiments/output/
 experiments/old/
+
+# TL読み込み用サンプル
+tl_sample
