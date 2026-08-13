@@ -4,6 +4,7 @@ from pathlib import Path
 from dash import html, dcc
 
 from app import OCR_ENABLED
+from app.backend import skill_order
 
 # PyInstaller バンドル時は _MEIPASS、通常時はプロジェクトルート
 if getattr(sys, "frozen", False):
@@ -627,41 +628,62 @@ def _restart_page() -> html.Div:
 # ---------------------------------------------------------------------------
 # スキル順探索ページ
 # ---------------------------------------------------------------------------
-SO_N_SKILLS = 6
-_SO_DEFAULT_NAMES = ["", "", "", "", "", ""]
+SO_MAX_CARDS = 10           # 制約解除決戦の最大枚数(= カード設定行の数)
+SO_DEFAULT_CARDS = 6        # 通常戦
+_SO_DEFAULT_NAMES = [""] * SO_MAX_CARDS
 
 
-def so_skill_options(names: list, copiers: set) -> list:
+def so_card_count_options(hand_size: int) -> list:
+    """カード枚数ドロップダウンの選択肢。"""
+    hi = SO_MAX_CARDS if hand_size >= 5 else 6
+    return [{"label": f"{i}枚", "value": str(i)} for i in range(1, hi + 1)]
+
+
+def so_slot_options(hand_size: int) -> list:
+    """スロット指定ドロップダウンの選択肢。"""
+    labels = skill_order.slot_labels(hand_size)
+    return ([{"label": "任意", "value": "any"}]
+            + [{"label": lb, "value": str(i + 1)}
+               for i, lb in enumerate(labels)])
+
+
+def so_skill_options(names: list, copiers: set,
+                     n_cards: int = SO_DEFAULT_CARDS) -> list:
     """手順ステップの「使うカード」ドロップダウン選択肢。
 
-    value 形式: "any" / "n{i}" (スキルiの元カード) / "c{i}" (スキルiのコピー)。
+    value 形式: "any" / "n{i}" (スキルiの元カード) / "c{i}" (スキルiのコピー)
+                / "r{i}" (スキルiのキャラが撤退)。
     名前を後から変えても添字参照なので選択は維持される。
     """
     def nm(i):
         return (names[i] or "").strip() or f"カード{i + 1}"
 
     opts = [{"label": "指定なし(何でも)", "value": "any"}]
-    for i in range(len(names)):
+    for i in range(n_cards):
         suffix = " ※複製スキル" if i in copiers else ""
         opts.append({"label": nm(i) + suffix, "value": f"n{i}"})
     if copiers:
-        for i in range(len(names)):
+        for i in range(n_cards):
             if i not in copiers:
                 opts.append({"label": f"{nm(i)}(コピー)", "value": f"c{i}"})
+    for i in range(n_cards):
+        opts.append({"label": f"↩ {nm(i)} 撤退", "value": f"r{i}"})
     return opts
 
 
-def so_target_options(names: list, copiers: set) -> list:
+def so_target_options(names: list, copiers: set,
+                      n_cards: int = SO_DEFAULT_CARDS) -> list:
     """複製対象ドロップダウンの選択肢(複製キャラ自身は対象外)。"""
     return [
         {"label": (names[i] or "").strip() or f"カード{i + 1}", "value": str(i)}
-        for i in range(len(names)) if i not in copiers
+        for i in range(n_cards) if i not in copiers
     ]
 
 
 def make_so_step(index: int, skill_options: list, target_options: list, *,
                  skill=None, target=None, slot: str = "any",
-                 draw: bool = False, memo: str = "") -> html.Div:
+                 draw: bool = False, memo: str = "",
+                 hand_size: int = 3) -> html.Div:
     """手順(PLAN)の1ステップ行を生成する。行の並び順 = 手順の順番。
 
     skill が None(未選択)の行は実行時に無視される。
@@ -675,7 +697,7 @@ def make_so_step(index: int, skill_options: list, target_options: list, *,
                 placeholder="生徒を選択",
                 clearable=False,
                 className="so-dd-skill",
-                style={"width": "160px", "flexShrink": "0"},
+                style={"width": "180px", "flexShrink": "0"},
             ),
             # 複製対象: 複製スキルを選択した行でのみコールバックが表示する
             dcc.Dropdown(
@@ -690,12 +712,7 @@ def make_so_step(index: int, skill_options: list, target_options: list, *,
                                    "marginLeft": "2px"}),
             dcc.Dropdown(
                 id={"type": "so-step-slot", "index": index},
-                options=[
-                    {"label": "任意", "value": "any"},
-                    {"label": "左", "value": "1"},
-                    {"label": "中", "value": "2"},
-                    {"label": "右", "value": "3"},
-                ],
+                options=so_slot_options(hand_size),
                 value=slot,
                 clearable=False,
                 searchable=False,
@@ -715,6 +732,15 @@ def make_so_step(index: int, skill_options: list, target_options: list, *,
                 style={"flex": "1", "minWidth": "80px",
                        "fontSize": "0.85rem"},
             ),
+            html.Button("↑", id={"type": "so-step-up", "index": index},
+                        n_clicks=0, title="1つ上へ移動",
+                        className="so-mini-btn"),
+            html.Button("↓", id={"type": "so-step-down", "index": index},
+                        n_clicks=0, title="1つ下へ移動",
+                        className="so-mini-btn"),
+            html.Button("＋", id={"type": "so-step-insert", "index": index},
+                        n_clicks=0, title="この下に手順を挿入",
+                        className="so-mini-btn"),
             html.Button("✕", id={"type": "so-step-remove", "index": index},
                         n_clicks=0, title="このステップを削除",
                         className="so-mini-btn"),
@@ -757,11 +783,13 @@ def make_so_constraint(index: int, *, ctype: str = "diff", steps: str = "") -> h
 
 def _skill_order_page() -> html.Div:
     """スキル順(開始スキル設定)探索ページ。"""
-    initial_skill_opts = so_skill_options(_SO_DEFAULT_NAMES, set())
-    initial_target_opts = so_target_options(_SO_DEFAULT_NAMES, set())
+    initial_skill_opts = so_skill_options(_SO_DEFAULT_NAMES, set(),
+                                          SO_DEFAULT_CARDS)
+    initial_target_opts = so_target_options(_SO_DEFAULT_NAMES, set(),
+                                            SO_DEFAULT_CARDS)
 
     skill_rows = []
-    for i in range(SO_N_SKILLS):
+    for i in range(SO_MAX_CARDS):
         skill_rows.append(
             html.Div(
                 [
@@ -782,8 +810,10 @@ def _skill_order_page() -> html.Div:
                         style={"whiteSpace": "nowrap", "fontSize": "0.82rem"},
                     ),
                 ],
+                id={"type": "so-name-row", "index": i},
                 style={"display": "flex", "gap": "8px", "alignItems": "center",
-                       "width": "calc(33.3% - 9px)", "minWidth": "240px"},
+                       "width": "calc(33.3% - 9px)", "minWidth": "240px",
+                       **({} if i < SO_DEFAULT_CARDS else {"display": "none"})},
             )
         )
 
@@ -791,16 +821,47 @@ def _skill_order_page() -> html.Div:
         [
             html.H3("スキル順探索(β版)", style={"marginTop": "0"}),
             html.P(
-                "使いたいスキル順(手順)を満たす「開始スキル設定(手札3枚+山札3枚の初期配置)」"
-                "を全探索します。",
+                "使いたいスキル順(手順)を満たす「開始スキル設定(手札+山札の初期配置)」"
+                "を全探索します。通常戦(手札3枚)と制約解除決戦(手札5枚)に対応。",
                 style={"fontSize": "0.88rem", "color": "#555"},
+            ),
+            # --- モード / 枚数 ---
+            html.Div(
+                [
+                    html.Label("モード", style=LABEL_STYLE),
+                    dcc.Dropdown(
+                        id="so-hand-size",
+                        options=[
+                            {"label": "通常戦(手札3枚)", "value": "3"},
+                            {"label": "制約解除決戦(手札5枚)", "value": "5"},
+                        ],
+                        value="3",
+                        clearable=False,
+                        searchable=False,
+                        style={"width": "200px", "margin": "0 16px 0 8px"},
+                    ),
+                    html.Label("カード枚数", style=LABEL_STYLE),
+                    dcc.Dropdown(
+                        id="so-card-count",
+                        options=so_card_count_options(3),
+                        value=str(SO_DEFAULT_CARDS),
+                        clearable=False,
+                        searchable=False,
+                        style={"width": "100px", "margin": "0 0 0 8px"},
+                    ),
+                ],
+                style={"display": "flex", "alignItems": "center",
+                       "marginBottom": "12px"},
             ),
             # --- カード(スキル)設定 ---
             html.Div(
                 [
-                    html.Strong("カード設定(6枚)"),
+                    html.Strong("カード設定", id="so-cards-title"),
                     html.Div(
-                        "キャラ名を入力。リオなど複製スキル持ちは「複製スキル」にチェック。",
+                        "キャラ名を入力。リオなど複製スキル持ちは「複製スキル」にチェック。"
+                        "カード枚数が手札枚数に満たない場合、余った手札スロットは空欄になります。"
+                        "TL貼り付けで表記ゆれがある場合は「ドアル/アル」のように / 区切りで"
+                        "別名を書けます(先頭が表示名)。",
                         style={"fontSize": "0.8rem", "color": "#888", "margin": "4px 0 8px"},
                     ),
                     html.Div(skill_rows,
@@ -823,8 +884,46 @@ def _skill_order_page() -> html.Div:
                             html.Br(),
                             "「ドロー」= そのステップでスキルカードの"
                             "ドローが発生する場合にチェック。",
+                            html.Br(),
+                            "「↩ ◯◯ 撤退」= その時点で撤退。カードは場から除外され、"
+                            "手札にあった場合はそのスロットに山札から1枚ドローします。",
                         ],
                         style={"fontSize": "0.8rem", "color": "#888", "margin": "4px 0 8px"},
+                    ),
+                    # --- TLテキストからの一括入力 ---
+                    html.Details(
+                        [
+                            html.Summary("📋 TLテキストから一括入力",
+                                         style={"cursor": "pointer",
+                                                "fontSize": "0.88rem",
+                                                "fontWeight": "bold"}),
+                            html.Div(
+                                "先にカード設定へキャラ名を入力してから、TLを貼り付けて"
+                                "「手順に変換」を押してください。時刻・コスト・"
+                                "「即」「オート」「◯◯NS後」などの注記、`//` や 【…】 以降は"
+                                "読み飛ばします。`cマリー`＝コピー使用、`リオ(マリー)`＝複製対象、"
+                                "`◯◯撤退`＝撤退として読み取ります。"
+                                "現在の手順は置き換わります。",
+                                style={"fontSize": "0.78rem", "color": "#888",
+                                       "margin": "6px 0"},
+                            ),
+                            dcc.Textarea(
+                                id="so-tl-text",
+                                placeholder="例:\n即 リオ（マリー） cマリー ホシノ\n"
+                                            "11 ドアル\n10.5 マリー",
+                                style={"width": "100%", "height": "120px",
+                                       "fontSize": "0.82rem"},
+                            ),
+                            html.Button("手順に変換", id="so-tl-import-btn",
+                                        n_clicks=0,
+                                        style={"marginTop": "6px"}),
+                            html.Div(id="so-tl-msg",
+                                     style={"fontSize": "0.8rem",
+                                            "margin": "6px 0"}),
+                        ],
+                        style={"border": "1px dashed #ccc", "borderRadius": "6px",
+                               "padding": "8px 10px", "marginBottom": "10px",
+                               "background": "#fff"},
                     ),
                     html.Div(id="so-steps-container",
                              children=[make_so_step(0, initial_skill_opts, initial_target_opts)]),
