@@ -37,10 +37,13 @@ def test_strips_timing_annotations():
 def test_comments_are_ignored():
     text = ("2:22.500 マリー イロハ 【254】イロハで255台。目標は254\n"
             "即 ホシノ //0:54.000くらい\n"
+            "11 ドアル /キサキが落ちてたら飛ばす\n"
+            "10 キサキ ※お祈り\n"
             "目標 2.4億付近\n")
     steps, _ = parse_timeline(text, NAMES)
-    # 【 以降と // 以降は注釈。目標行も無視される
-    assert [n for _, n in kinds(steps)] == ["マリー", "ホシノ"]
+    # 【 / // / / / ※ 以降は注釈。目標行も無視される
+    assert [n for _, n in kinds(steps)] == [
+        "マリー", "ホシノ", "ドアル", "キサキ"]
 
 
 def test_ns_annotation_is_not_a_card_use():

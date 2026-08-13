@@ -4,7 +4,7 @@
 対応している書き方:
   - 発動タイミングの注記は読み飛ばす
     例: 即 / オート / auto / コストカット後 / ◯◯NS後 / 11 / 10.5 / 3:03.000
-  - `//` 以降、`【` 以降は行末までコメント扱い
+  - `/` `//` `※` `【` 以降は行末までコメント扱い
   - `目標…` の行、`〆` は無視
   - `c◯◯` `C◯◯` `◯◯(コピー)` はコピーカードの使用
   - `◯◯(△△)` の括弧は対象指定。複製キャラなら複製対象、
@@ -92,7 +92,7 @@ def parse_timeline(text, names, copiers=()):
         line = raw.strip()
         if not line:
             continue
-        line = re.sub(r"//.*", "", line)
+        line = re.sub(r"/.*", "", line)           # / も // 以降も注釈
         line = re.sub(r"【.*", "", line)          # 【254】以降は注釈
         line = re.sub(r"※.*", "", line)          # ※以降も注釈
         line = line.replace("（", "(").replace("）", ")")
