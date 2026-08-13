@@ -4,7 +4,7 @@
 対応している書き方:
   - 発動タイミングの注記は読み飛ばす
     例: 即 / オート / auto / コストカット後 / ◯◯NS後 / 11 / 10.5 / 3:03.000
-  - `//` 以降、`【` 以降は行末までコメント扱い
+  - `/` `//` `※` `【` 以降は行末までコメント扱い
   - `目標…` の行、`〆` は無視
   - `c◯◯` `C◯◯` `◯◯(コピー)` はコピーカードの使用
   - `◯◯(△△)` の括弧は対象指定。複製キャラなら複製対象、
@@ -42,10 +42,12 @@ class TLStep:
 # 行頭・語中に現れる発動タイミングの注記(カード使用ではない)
 _NOISE = [
     r"[0-9]+[:.][0-9]+[:.][0-9]+",      # 3:03.000 / 1.19.1 / 2:22:500
+    r"[0-9]+:[0-9]+",                   # 2:58 / 0:30
     r"[0-9]+(?:\.[0-9]+)?\s*[c憶億万]?",  # コスト・残HPなどの数値
     r"コストカット後?", r"指定できるようになったら", r"オート解除",
     r"オート", r"ｵｰﾄ", r"auto", r"Auto", r"AUTO",
-    r"即", r"指定", r"付近", r"くらい", r"残", r"未満", r"以下", r"以上",
+    r"即", r"指定", r"付近", r"くらい", r"ぐらい", r"残", r"未満", r"以下",
+    r"以上", r"適当", r"移行後", r"歯車", r"予告", r"直前", r"秒後",
     r"本体", r"諸説", r"単遅延", r"爆発後", r"HP", r"NS", r"ns", r"後",
 ]
 _NOISE_RE = re.compile("|".join(_NOISE))
@@ -90,8 +92,9 @@ def parse_timeline(text, names, copiers=()):
         line = raw.strip()
         if not line:
             continue
-        line = re.sub(r"//.*", "", line)
+        line = re.sub(r"/.*", "", line)           # / も // 以降も注釈
         line = re.sub(r"【.*", "", line)          # 【254】以降は注釈
+        line = re.sub(r"※.*", "", line)          # ※以降も注釈
         line = line.replace("（", "(").replace("）", ")")
         line = line.replace("ｃ", "c").replace("Ｃ", "C")
         if not line.strip():
@@ -100,8 +103,9 @@ def parse_timeline(text, names, copiers=()):
             # 区切りより後にもカード使用が続くなら、TL が複数入っている
             separated = bool(steps)
             continue
-        # 「◯◯NS後」はタイミングの注記なのでカード使用ではない
-        line = re.sub(rf"(?:{name_re.pattern})?[NnＮｎ][SsＳｓ]後", " ", line)
+        # 「◯◯NS後」「◯◯NS」「NS直前」はタイミングの注記なのでカード使用ではない
+        line = re.sub(
+            rf"(?:{name_re.pattern})?[NnＮｎ][SsＳｓ](?:後|直前)?", " ", line)
 
         used, skipped = _scan_line(line, name_re, lookup, copiers, raw)
         rest = _PUNCT_RE.sub(" ", _NOISE_RE.sub(" ", skipped)).strip()

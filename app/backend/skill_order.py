@@ -196,7 +196,7 @@ def same_slot(*indices):
 # --- 探索本体 ---------------------------------------------------------------
 class _Ctx:
     __slots__ = ("n", "copiers", "plan", "hand_size", "constraints",
-                 "max_results", "budget", "results", "truncated")
+                 "max_results", "budget", "results", "truncated", "max_depth")
 
 
 def _perm(u, k):
@@ -328,6 +328,8 @@ def _record(assign, used, nocop, trace, ctx):
 
 
 def _dfs(hand, deck, i, assign, used, nocop, trace, ctx):
+    if i > ctx.max_depth:
+        ctx.max_depth = i          # どの手順まで到達できたか(0件時の診断用)
     if i == len(ctx.plan):
         _record(assign, used, nocop, trace, ctx)
         return
@@ -402,9 +404,22 @@ def _dfs(hand, deck, i, assign, used, nocop, trace, ctx):
             trace.pop()
 
 
+NODE_BUDGET_BASE = 2_000_000        # 手順が短いときの下限
+NODE_BUDGET_PER_STEP = 200_000      # 手順1手あたりに許す無駄な探索
+
+
+def default_node_budget(plan):
+    """手順長に応じた探索ノード数の既定上限。
+
+    手順が長いほど、解に届くまでに辿るノードも死に枝も増える。絶対値で
+    固定すると長い TL がそれだけで打ち切られるので、1手あたりで見る。
+    """
+    return max(NODE_BUDGET_BASE, NODE_BUDGET_PER_STEP * len(plan))
+
+
 def solve(n_skills, copiers, plan, constraints=(), *,
           hand_size=HAND_SIZE_NORMAL, max_results=None,
-          node_budget=2_000_000):
+          node_budget=None, stats=None):
     """条件を満たす初期配置を列挙する。
 
     n_skills   : カード枚数(通常戦6 / 制約解除決戦10)。
@@ -414,6 +429,13 @@ def solve(n_skills, copiers, plan, constraints=(), *,
     hand_size  : 手札スロット数(通常3 / 決戦5)。
     max_results: 解がこの数に達したら探索を打ち切る(None なら無制限)。
     node_budget: 探索ノード数の上限。超えたら SearchBudgetExceeded。
+                 None なら default_node_budget()(手順長に比例)。
+                 解を max_results 件そろえるには最低でも
+                 max_results × 手順長 ノードを辿る必要があるため、
+                 その分は上限とは別枠で加算する(手順が長いだけで
+                 打ち切られないようにする)。
+    stats      : dict を渡すと "max_depth"(探索が到達できた最大の手順数)を
+                 書き込む。解が0件のとき、どの手順で成立しなくなるかが分かる。
 
     戻り値: (results, truncated)
     results   = [Solution, ...]  (layout, trace) としても展開できる
@@ -426,9 +448,12 @@ def solve(n_skills, copiers, plan, constraints=(), *,
     ctx.hand_size = hand_size
     ctx.constraints = tuple(constraints)
     ctx.max_results = max_results
-    ctx.budget = [node_budget]
+    if node_budget is None:
+        node_budget = default_node_budget(plan)
+    ctx.budget = [node_budget + (max_results or 0) * len(plan)]
     ctx.results = []
     ctx.truncated = False
+    ctx.max_depth = 0
 
     hand = [("P", p) for p in range(min(n_skills, hand_size))]
     hand += [None] * max(0, hand_size - n_skills)
@@ -438,6 +463,9 @@ def solve(n_skills, copiers, plan, constraints=(), *,
         _dfs(hand, deck, 0, {}, frozenset(), frozenset(), [], ctx)
     except _StopSearch:
         ctx.truncated = True
+    finally:
+        if stats is not None:
+            stats["max_depth"] = ctx.max_depth
     return ctx.results, ctx.truncated
 
 

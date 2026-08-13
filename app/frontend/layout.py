@@ -900,8 +900,9 @@ def _skill_order_page() -> html.Div:
                             html.Div(
                                 "先にカード設定へキャラ名を入力してから、TLを貼り付けて"
                                 "「手順に変換」を押してください。時刻・コスト・"
-                                "「即」「オート」「◯◯NS後」などの注記、`//` や 【…】 以降は"
-                                "読み飛ばします。`cマリー`＝コピー使用、`リオ(マリー)`＝複製対象、"
+                                "「即」「オート」「◯◯NS後」などの注記、"
+                                "/ ・ // ・ ※ ・ 【…】 以降は読み飛ばします。"
+                                "`cマリー`＝コピー使用、`リオ(マリー)`＝複製対象、"
                                 "`◯◯撤退`＝撤退として読み取ります。"
                                 "現在の手順は置き換わります。",
                                 style={"fontSize": "0.78rem", "color": "#888",
@@ -952,7 +953,8 @@ def _skill_order_page() -> html.Div:
             # --- 実行 ---
             html.Div(
                 [
-                    html.Label("表示件数上限", style=LABEL_STYLE),
+                    html.Label("表示件数上限", style=LABEL_STYLE,
+                               title="この件数(最低500件)が見つかった時点で探索を打ち切ります"),
                     dcc.Input(id="so-limit", type="number", value=60, min=1, max=1000,
                               style={"width": "90px", "margin": "0 16px 0 8px"}),
                     html.Button("探索実行", id="so-run-btn", n_clicks=0,
