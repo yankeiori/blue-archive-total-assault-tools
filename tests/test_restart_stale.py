@@ -32,6 +32,7 @@ def _inputs():
 _BASE = dict(D=400000, cp_store=[5],
              seg_times={"0": 1.0, "5": 1.0},
              seg_success={"0": 100.0, "5": 100.0},
+             save_store=[],
              global_crit=60, global_evade=0, damage_mode="post_decay",
              hp_mode="off", hp_H=None, hp_H1=None, hp_R0=None, hp_R1=None)
 
@@ -47,6 +48,7 @@ def _run(order, param_values, param_ids):
         1, _BASE["D"], order, [0, 1], param_values, param_ids,
         ["A", "B"], [{"index": 0}, {"index": 1}],
         _BASE["cp_store"], _BASE["seg_times"], _BASE["seg_success"],
+        _BASE["save_store"],
         _BASE["global_crit"], _BASE["global_evade"], _BASE["damage_mode"],
         _BASE["hp_mode"], _BASE["hp_H"], _BASE["hp_H1"],
         _BASE["hp_R0"], _BASE["hp_R1"])
@@ -57,7 +59,7 @@ def _stale(cfg, order, param_values, param_ids, **over):
     kw = {**_BASE, **over}
     return cb.flag_restart_stale(
         cfg, kw["D"], order, [0, 1], param_values, kw["cp_store"],
-        kw["seg_times"], kw["seg_success"], kw["global_crit"],
+        kw["seg_times"], kw["seg_success"], kw["save_store"], kw["global_crit"],
         kw["global_evade"], kw["damage_mode"], kw["hp_mode"],
         kw["hp_H"], kw["hp_H1"], kw["hp_R0"], kw["hp_R1"], param_ids)
 
@@ -76,6 +78,7 @@ def test_fingerprint_tracks_the_inputs_that_matter():
     assert _fp([0, 1], changed, ids) != base
     assert _fp([0, 1], vals, ids, D=500000) != base
     assert _fp([0, 1], vals, ids, cp_store=[3]) != base
+    assert _fp([0, 1], vals, ids, save_store=[5]) != base
     assert _fp([0, 1], vals, ids, global_crit=70) != base
 
 
