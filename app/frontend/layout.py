@@ -525,7 +525,9 @@ def _restart_page() -> html.Div:
             html.H3("足切りライン最適化", style={"marginTop": "0"}),
             html.P(
                 "「ダメージシミュレータ」で設定した攻撃列を使い、複数チェックポイントで"
-                "リセットする運用の最適足切りラインを計算します。",
+                "リセットする運用の最適足切りラインを計算します。"
+                "区間カードの「🚩 ここで凸を区切る」を入れると、その境界がセーブポイント"
+                "(そこまでのダメージは確定し、以後のリセットでも失われない) になります。",
                 style={"fontSize": "0.88rem", "color": "#555"},
             ),
             html.Div(
@@ -584,6 +586,8 @@ def _restart_page() -> html.Div:
                                        "border": "none", "borderRadius": "4px",
                                        "padding": "8px 18px", "cursor": "pointer",
                                        "fontWeight": "bold", "marginTop": "12px"}),
+                    # 解析実行後に入力が変わると「結果が古い」注記が出る (callbacks 側)
+                    html.Div(id="restart-stale-note"),
                 ],
                 style={"background": "#fff0f0", "border": "2px solid #d63031",
                        "borderRadius": "8px", "padding": "14px", "marginBottom": "16px"},
@@ -606,6 +610,7 @@ def _restart_page() -> html.Div:
                         style={"fontSize": "0.82rem", "color": "#666",
                                "marginBottom": "10px"},
                     ),
+                    html.Div(id="restart-stale-note-interactive"),
                     html.Div(id="restart-gate-sliders"),
                     dcc.Loading(
                         [
@@ -1199,6 +1204,8 @@ def create_layout() -> html.Div:
             dcc.Store(id="restart-seg-time-store", data={"0": 1.0}),
             # 多段リスタ: 区間ごとのダメージ独立成功確率 % (区間開始境界 → 0..100)
             dcc.Store(id="restart-seg-success-store", data={"0": 100.0}),
+            # 多段リスタ: 凸区切り (セーブポイント) にした境界の累積ヒット数のリスト
+            dcc.Store(id="restart-save-store", data=[]),
             # 多段リスタ: 総ヒット数 (区間描画用)
             dcc.Store(id="restart-nhits", data=0),
         ],

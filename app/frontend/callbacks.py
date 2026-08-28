@@ -1,4 +1,5 @@
 import base64
+import hashlib
 import json
 
 import dash
@@ -7,7 +8,9 @@ from dash import callback, Input, Output, State, ALL, MATCH, ctx, dcc, html
 from dash.exceptions import PreventUpdate
 
 from app import OCR_ENABLED
-from app.backend import ocr, restart_cos, restart_mixed, skill_order, tl_parse
+from app.backend import (
+    ocr, restart_cos, restart_mixed, restart_save, skill_order, tl_parse,
+)
 from app.backend.cos import HPParams, build_hit_mixtures, y_mixture
 from app.backend.mixed import card_is_hp_dep, hit_specs_from_cards, mixed_support
 from app.frontend.layout import (
@@ -264,6 +267,37 @@ def _assemble_cards_ordered(order, card_indices, param_values, param_ids):
     return [(i, by_index[i]) for i in seq if i in by_index]
 
 
+def _restart_fingerprint(order, card_indices, param_values, param_ids, cp_store,
+                         seg_times, seg_success, save_store, D,
+                         global_crit, global_evade,
+                         damage_mode, hp_mode, hp_H, hp_H1, hp_R0, hp_R1) -> str:
+    """足切り最適化の結果を左右する入力だけを 1 本の指紋にまとめる。
+
+    run_restart は実行ボタンでしか発火しないため、実行後にカードを並べ替えたり
+    パラメータを変えたりしても図・表は古いまま残る。実行時の指紋を restart-config
+    に載せておき、現在の指紋と突き合わせて「再実行してください」を出すのに使う。
+
+    カード名 (メモ) は数値結果に影響しないので含めない (入力中の点滅を避ける)。
+    HP 依存パラメータは hp_mode が on のときだけ効くので、off なら無視する。
+    """
+    ordered = _assemble_cards_ordered(order, card_indices, param_values, param_ids)
+    payload = {
+        "cards": [{k: params.get(k) for k in _CARD_PARAMS} for _idx, params in ordered],
+        "cps": sorted({int(x) for x in (cp_store or [])}),
+        "seg_times": seg_times or {},
+        "seg_success": seg_success or {},
+        "saves": sorted({int(x) for x in (save_store or [])}),
+        "D": D,
+        "crit": global_crit,
+        "evade": global_evade,
+        "damage_mode": damage_mode,
+        "hp_mode": hp_mode,
+        "hp": [hp_H, hp_H1, hp_R0, hp_R1] if hp_mode == "on" else None,
+    }
+    blob = json.dumps(payload, sort_keys=True, default=str)
+    return hashlib.md5(blob.encode("utf-8")).hexdigest()
+
+
 # ---------------------------------------------------------------------------
 # 入力情報のエクスポート (カード + 全体設定 + 多段リスタ設定 → JSON ダウンロード)
 # ---------------------------------------------------------------------------
@@ -279,6 +313,7 @@ def _assemble_cards_ordered(order, card_indices, param_values, param_ids):
     State("restart-cp-store", "data"),
     State("restart-seg-time-store", "data"),
     State("restart-seg-success-store", "data"),
+    State("restart-save-store", "data"),
     State("target-damage", "value"),
     State("global-crit-rate", "value"),
     State("global-evade-rate", "value"),
@@ -293,7 +328,8 @@ def _assemble_cards_ordered(order, card_indices, param_values, param_ids):
 )
 def export_input(n_clicks, order, card_indices, param_values, param_ids,
                  memo_values, memo_ids, cp_store, seg_times, seg_success,
-                 target_damage, gcrit, gevade, gstab, calc_method, damage_mode,
+                 save_store, target_damage, gcrit, gevade, gstab, calc_method,
+                 damage_mode,
                  hp_mode, hp_H, hp_H1, hp_R0, hp_R1, restart_D):
     if not n_clicks:
         raise PreventUpdate
@@ -326,7 +362,9 @@ def export_input(n_clicks, order, card_indices, param_values, param_ids,
         },
         "cards": cards,
         "restart": {"checkpoints": cps, "segment_times": segment_times,
-                    "segment_success": segment_success},
+                    "segment_success": segment_success,
+                    "save_points": sorted({int(x) for x in (save_store or [])
+                                           if int(x) in cps})},
     }
     return dict(content=json.dumps(data, ensure_ascii=False, indent=2),
                 filename="damage_cutoff_input.json")
@@ -343,6 +381,7 @@ def export_input(n_clicks, order, card_indices, param_values, param_ids,
     Output("restart-cp-store", "data", allow_duplicate=True),
     Output("restart-seg-time-store", "data", allow_duplicate=True),
     Output("restart-seg-success-store", "data", allow_duplicate=True),
+    Output("restart-save-store", "data", allow_duplicate=True),
     Output("io-status", "children"),
     Output("target-damage", "value"),
     Output("global-crit-rate", "value"),
@@ -371,7 +410,8 @@ def import_input(contents):
         if not isinstance(cards, list) or not cards:
             raise ValueError("カードが空です。")
     except Exception as exc:  # noqa: BLE001 - 不正ファイルはユーザーに表示
-        return (nu, nu, nu, nu, nu, nu, nu, f"⚠ インポート失敗: {exc}", *globals_nu)
+        return (nu, nu, nu, nu, nu, nu, nu, nu, f"⚠ インポート失敗: {exc}",
+                *globals_nu)
 
     children = []
     total_hits = 0
@@ -392,13 +432,15 @@ def import_input(contents):
     seg_success = {str(k): float(v)
                    for k, v in (restart.get("segment_success", {}) or {}).items()}
     seg_success.setdefault("0", 100.0)
+    saves = sorted({int(x) for x in (restart.get("save_points", []) or [])
+                    if int(x) in cps})
 
     g = data.get("globals", {}) or {}
     def gv(key):
         return g[key] if key in g else nu
     msg = f"✅ {n} 枚のカードと設定を読み込みました。足切りライン最適化の設定も復元済みです。"
     return (
-        children, indices, n, indices, cps, seg_times, seg_success, msg,
+        children, indices, n, indices, cps, seg_times, seg_success, saves, msg,
         gv("target_damage"), gv("global_crit"), gv("global_evade"), gv("global_stability"),
         gv("calc_method"), gv("damage_mode"), gv("hp_mode"),
         gv("hp_H"), gv("hp_H1"), gv("hp_R0"), gv("hp_R1"), gv("restart_D"),
@@ -498,10 +540,16 @@ def _segments(cps, n):
     return [(bounds[i], bounds[i + 1]) for i in range(len(bounds) - 1)]
 
 
-def _seg_card(idx, total, s, e, weight, end_label, success=100.0):
-    """区間カード 1 枚 (横長) を生成する。末尾以外は ✕ で足切り (境界 e) を解除。"""
+def _seg_card(idx, total, s, e, weight, end_label, success=100.0, is_save=False):
+    """区間カード 1 枚 (横長) を生成する。末尾以外は ✕ で足切り (境界 e) を解除。
+
+    is_save=True の境界は凸区切り (セーブポイント) で、そこまでのダメージが確定し、
+    以後のリセットでもその境界より前には戻らない。
+    """
     is_last = idx == total - 1
     head = "完走(最終区間)" if is_last else f"足切り{idx + 1}"
+    if is_save and not is_last:
+        head += "・🚩凸区切り"
     title = f"区間{idx + 1}・{head}"
     sub = f"ヒット {s + 1}–{e}"
     if not is_last and end_label:
@@ -550,6 +598,26 @@ def _seg_card(idx, total, s, e, weight, end_label, success=100.0):
                    "borderLeft": "1px solid #dfe6e9", "paddingLeft": "12px"},
         ),
     ]
+    # 中3: 凸区切り (セーブポイント) のトグル。末尾区間の後ろには境界が無い。
+    if not is_last:
+        cells.append(html.Div(
+            [
+                dcc.Checklist(
+                    id={"type": "restart-seg-save", "index": e},
+                    options=[{"label": " 🚩 ここで凸を区切る", "value": "on"}],
+                    value=(["on"] if is_save else []),
+                    inputStyle={"marginRight": "3px"},
+                    style={"fontSize": "0.8rem",
+                           "color": "#b35900" if is_save else "#666",
+                           "fontWeight": "bold" if is_save else "normal"},
+                ),
+            ],
+            title="この境界で凸が終わります。ここまでのダメージは確定 (セーブ) され、"
+                  "以後リセットしてもこの境界より前には戻りません。"
+                  "凸区切りの足切りは「この凸を確定させてよいか」の判断になります。",
+            style={"whiteSpace": "nowrap",
+                   "borderLeft": "1px solid #dfe6e9", "paddingLeft": "12px"},
+        ))
     # 右: 足切り解除 (末尾区間以外)
     cells.append(html.Button(
         "✕", id={"type": "restart-cp-remove", "index": e if not is_last else -1},
@@ -562,9 +630,12 @@ def _seg_card(idx, total, s, e, weight, end_label, success=100.0):
     return html.Div(
         cells,
         style={"display": "flex", "alignItems": "center", "gap": "12px",
-               "border": "1px solid #d63031", "borderRadius": "8px",
+               "border": ("2px solid #b35900" if (is_save and not is_last)
+                          else "1px solid #d63031"),
+               "borderRadius": "8px",
                "padding": "8px 14px", "marginBottom": "8px",
-               "background": "#fff", "width": "100%", "boxSizing": "border-box"},
+               "background": "#fffaf3" if (is_save and not is_last) else "#fff",
+               "width": "100%", "boxSizing": "border-box"},
     )
 
 
@@ -575,9 +646,10 @@ def _seg_card(idx, total, s, e, weight, end_label, success=100.0):
     Input("restart-cp-dropdown", "options"),
     State("restart-seg-time-store", "data"),
     State("restart-seg-success-store", "data"),
+    State("restart-save-store", "data"),
     prevent_initial_call=True,
 )
-def render_restart_cards(cp_store, n, options, seg_times, seg_success):
+def render_restart_cards(cp_store, n, options, seg_times, seg_success, save_store):
     segs = _segments(cp_store, n)
     if not segs:
         return html.Div("攻撃列が未読込です。「カード読込 / 更新」を押してください。",
@@ -585,12 +657,28 @@ def render_restart_cards(cp_store, n, options, seg_times, seg_success):
     label_by = {opt["value"]: opt["label"] for opt in (options or [])}
     seg_times = seg_times or {}
     seg_success = seg_success or {}
+    saves = {int(x) for x in (save_store or [])}
     cards = []
     for i, (s, e) in enumerate(segs):
         cards.append(_seg_card(i, len(segs), s, e,
                                seg_times.get(str(s), 1.0), label_by.get(e, ""),
-                               seg_success.get(str(s), 100.0)))
+                               seg_success.get(str(s), 100.0), e in saves))
     return html.Div(cards, style={"display": "flex", "flexDirection": "column"})
+
+
+@callback(
+    Output("restart-save-store", "data", allow_duplicate=True),
+    Input({"type": "restart-seg-save", "index": ALL}, "value"),
+    State({"type": "restart-seg-save", "index": ALL}, "id"),
+    prevent_initial_call=True,
+)
+def update_restart_save(values, ids):
+    """凸区切り (セーブポイント) にした境界の累積ヒット数を Store へ。
+
+    表示中のトグルから毎回作り直すので、足切りを解除するとその凸区切りも自動的に
+    消える (境界そのものが無くなるため)。
+    """
+    return sorted({int(sid["index"]) for v, sid in zip(values, ids) if v})
 
 
 @callback(
@@ -632,18 +720,29 @@ def update_restart_seg_success(values, ids, store):
 # 多段リスタ: 図・表の共通ヘルパー (最適表示 / インタラクティブ表示で共用)
 # ---------------------------------------------------------------------------
 def _restart_disp(res, cum_to_label, last_label, D):
-    """解析結果 res から (ラベル, 残りダメージ, 区間通過率, 累積通過率, 完走?) の行を作る。"""
+    """解析結果 res から表示用の行を作る。
+
+    行は [ラベル, 残りダメージ, 区間通過率, 累積通過率, 完走?, 凸区切り?,
+    残り下端, 残り上端]。累積通過率は凸区切りでリセットされる (凸区切り付きでは
+    各行の通過率は「その凸の 1 試行のうち、ここまで到達して通過した割合」で、
+    凸をまたいで掛け合わせるものではない)。残りの下端/上端は、足切りが直前の
+    セーブ地点の累積ダメージに依存して動く幅 (1凸目の中は幅ゼロ)。
+    """
     disp = []
     prev_cum = 1.0
     for r in res["rows"]:
         cum_pass = r["pass_rate"]
         sect = (cum_pass / prev_cum) if prev_cum > 0 else 0.0
         label = cum_to_label.get(str(r["checkpoint"]), f"{r['checkpoint']}ヒット目")
-        disp.append([label, D - r["gate"], sect, cum_pass, False])
-        prev_cum = cum_pass
+        is_save = bool(r.get("save"))
+        disp.append([label, D - r["gate"], sect, cum_pass, False, is_save,
+                     D - r.get("gate_hi", r["gate"]),
+                     D - r.get("gate_lo", r["gate"])])
+        prev_cum = 1.0 if is_save else cum_pass
     final_cum = res["success"]
     final_sect = (final_cum / prev_cum) if prev_cum > 0 else 0.0
-    disp.append([f"{last_label}(完走/目標達成)", 0.0, final_sect, final_cum, True])
+    disp.append([f"{last_label}(完走/目標達成)", 0.0, final_sect, final_cum,
+                 True, False, 0.0, 0.0])
     return disp
 
 
@@ -653,13 +752,19 @@ def _cutoff_figure(disp, title, *, color="#d63031", ref_disp=None):
     x軸は「足切り1, 2, …, 完走」の短い表記。カード名・区間/累積通過率は
     ホバーで表示する。点上の常時テキストは「残りダメージ」のみ(完走点は
     残り0固定なので省略し、y=0 の注記と重ねない)。"""
-    xs = ["完走" if is_final else f"足切り{i + 1}"
-          for i, (_lbl, _rem, _sect, _cum, is_final) in enumerate(disp)]
+    xs = ["完走" if row[4] else (f"足切り{i + 1}🚩" if row[5] else f"足切り{i + 1}")
+          for i, row in enumerate(disp)]
 
     def hover(d):
-        return [f"{x}({lbl})<br>残りダメージ {rem:,.0f}<br>"
-                f"区間通過率 {sect:.1%} / 累積通過率 {cumr:.1%}"
-                for x, (lbl, rem, sect, cumr, _f) in zip(xs, d)]
+        out = []
+        for x, row in zip(xs, d):
+            lbl, rem, sect, cumr, _fin, is_save, r_lo, r_hi = row
+            band = ("" if abs(r_hi - r_lo) < 1
+                    else f"<br>幅 {r_lo:,.0f}〜{r_hi:,.0f}(セーブ地点の累積次第)")
+            mark = "<br>🚩 ここで凸が確定 (セーブ)" if is_save else ""
+            out.append(f"{x}({lbl})<br>残りダメージ {rem:,.0f}{band}<br>"
+                       f"区間通過率 {sect:.1%} / 累積通過率 {cumr:.1%}{mark}")
+        return out
 
     fig = go.Figure()
     if ref_disp is not None:
@@ -669,13 +774,21 @@ def _cutoff_figure(disp, title, *, color="#d63031", ref_disp=None):
             marker=dict(size=8, color="#999"), name="最適ライン",
             hovertext=hover(ref_disp), hoverinfo="text",
         ))
+    band = [(d[7] - d[1], d[1] - d[6]) for d in disp]
+    err = dict(type="data", symmetric=False,
+               array=[max(a, 0.0) for a, _b in band],
+               arrayminus=[max(b, 0.0) for _a, b in band],
+               color="rgba(150,150,150,0.55)", thickness=1.4, width=6)
     fig.add_trace(go.Scatter(
         x=xs, y=[d[1] for d in disp],
         mode="lines+markers+text",
-        text=["" if is_final else f"残り{rem:,.0f}"
-              for (_lbl, rem, _sect, _cum, is_final) in disp],
+        error_y=err if any(a > 1 or b > 1 for a, b in band) else None,
+        text=["" if d[4] else f"残り{d[1]:,.0f}" for d in disp],
         textposition="top center", cliponaxis=False,
-        marker=dict(size=11, color=color),
+        marker=dict(size=11, color=color,
+                    symbol=["diamond" if d[5] else "circle" for d in disp],
+                    line=dict(width=[2 if d[5] else 0 for d in disp],
+                              color="#b35900")),
         line=dict(color=color),
         name="設定ライン" if ref_disp is not None else "最適足切り(残りダメージ)",
         hovertext=hover(disp), hoverinfo="text",
@@ -707,6 +820,7 @@ def _cutoff_figure(disp, title, *, color="#d63031", ref_disp=None):
     State("restart-cp-store", "data"),
     State("restart-seg-time-store", "data"),
     State("restart-seg-success-store", "data"),
+    State("restart-save-store", "data"),
     State("global-crit-rate", "value"),
     State("global-evade-rate", "value"),
     State("damage-mode", "value"),
@@ -719,10 +833,15 @@ def _cutoff_figure(disp, title, *, color="#d63031", ref_disp=None):
 )
 def run_restart(n_clicks, D, order, card_indices, param_values, param_ids,
                 memo_values, memo_ids, cp_store, seg_times, seg_success_store,
-                global_crit, global_evade,
+                save_store, global_crit, global_evade,
                 damage_mode, hp_mode, hp_H, hp_H1, hp_R0, hp_R1):
     if not n_clicks:
         raise PreventUpdate
+
+    # 指紋用に、正規化前 (float 化・or {} 前) の生値を控えておく。flag_restart_stale
+    # 側は生値しか持たないので、ここで正規化後の値を混ぜると常に不一致になる。
+    D_raw, seg_times_raw, seg_success_raw = D, seg_times, seg_success_store
+    save_raw = save_store
 
     empty = go.Figure()
 
@@ -746,6 +865,9 @@ def run_restart(n_clicks, D, order, card_indices, param_values, param_ids,
     cps = [c for c in cps if 0 < c < n]
     if not cps:
         return err("足切り(チェックポイント)を1つ以上追加してください。")
+
+    # 凸区切り (セーブポイント) = 足切り境界のうち「ここで凸が終わる」もの
+    saves = sorted({int(x) for x in (save_store or []) if int(x) in cps})
 
     # 時間割合: 区間(足切り間)ごとの相対重みを各区間内のヒットへ等分。
     # 区間は開始境界の累積ヒット数 (0, cps...) でキー付けされる。
@@ -793,8 +915,16 @@ def run_restart(n_clicks, D, order, card_indices, param_values, param_ids,
             if hp.Htil > 0 and D >= hp.Htil:
                 return err(f"目標 D は H̃₁={hp.Htil:,.0f} 未満にしてください(到達不能)。")
             ymix = [y_mixture(m, hp.beta) for m in hits]
-            res = restart_cos.analyze_product(ymix, hp, cps, hit_times, D,
-                                              seg_success=seg_success)
+            if saves:
+                try:
+                    res = restart_save.analyze_product(
+                        ymix, hp, cps, saves, hit_times, D,
+                        seg_success=seg_success)
+                except ValueError as exc:
+                    return err(str(exc))
+            else:
+                res = restart_cos.analyze_product(ymix, hp, cps, hit_times, D,
+                                                  seg_success=seg_success)
             model_note = "積モデル(HP依存)"
             model_key = "product"
         else:
@@ -804,12 +934,28 @@ def run_restart(n_clicks, D, order, card_indices, param_values, param_ids,
             d_max = mixed_support(specs, hp)[1]
             if D >= d_max:
                 return err(f"目標 D は最大可能ダメージ {d_max:,.0f} 未満にしてください(到達不能)。")
-            res = restart_mixed.analyze_mixed(specs, hp, cps, hit_times, D,
-                                              seg_success=seg_success)
+            if saves:
+                try:
+                    res = restart_save.analyze_mixed(
+                        specs, hp, cps, saves, hit_times, D,
+                        seg_success=seg_success)
+                except ValueError as exc:
+                    return err(str(exc))
+            else:
+                res = restart_mixed.analyze_mixed(specs, hp, cps, hit_times, D,
+                                                  seg_success=seg_success)
             model_note = "混在モデル(HP依存+通常、グリッドDP)"
             model_key = "mixed"
     else:
-        res = restart_cos.analyze(hits, cps, hit_times, D, seg_success=seg_success)
+        if saves:
+            try:
+                res = restart_save.analyze(hits, cps, saves, hit_times, D,
+                                           seg_success=seg_success)
+            except ValueError as exc:
+                return err(str(exc))
+        else:
+            res = restart_cos.analyze(hits, cps, hit_times, D,
+                                      seg_success=seg_success)
         model_note = ("和モデル(HP依存カードなし)" if hp_mode == "on"
                       else "和モデル(HP非依存)")
         model_key = "sum"
@@ -820,10 +966,15 @@ def run_restart(n_clicks, D, order, card_indices, param_values, param_ids,
     # 各関門を running max に引き上げても足切り判定・通過率・スループットは不変なので、
     # 実効的で単調な足切りラインを表示する。手動調整パス(update_restart_gates)は
     # 利用者入力をそのまま尊重するため触らない。
-    run_max = 0.0
-    for r in res["rows"]:
-        run_max = max(run_max, r["gate"])
-        r["gate"] = run_max
+    # 凸区切りありでは足切りがセーブ地点の累積ダメージに依存し、表に出しているのは
+    # その代表値 (重み付き平均) なので、running max で持ち上げると実際の方策と
+    # ずれる。単調化は凸区切りなし (関門がスカラー) のときだけ行う。
+    if not saves:
+        run_max = 0.0
+        for r in res["rows"]:
+            run_max = max(run_max, r["gate"])
+            r["gate"] = run_max
+            r["gate_lo"] = r["gate_hi"] = run_max
 
     # チェックポイントのヒット数 → カード名 の対応と、最終(完走)カード名を作る。
     memo_by = {mid["index"]: (v or "") for v, mid in zip(memo_values, memo_ids)}
@@ -851,9 +1002,16 @@ def run_restart(n_clicks, D, order, card_indices, param_values, param_ids,
     # --- リスタライン手動調整用の設定 (Store) と スライダー ---
     config = {
         "model": model_key,
+        # 実行時点の入力の指紋。以後の変更検知 (flag_restart_stale) に使う。
+        "fingerprint": _restart_fingerprint(
+            order, card_indices, param_values, param_ids, cp_store,
+            seg_times_raw, seg_success_raw, save_raw, D_raw,
+            global_crit, global_evade,
+            damage_mode, hp_mode, hp_H, hp_H1, hp_R0, hp_R1),
         "cards": cards, "crit": float(global_crit or 0),
         "evade": float(global_evade or 0), "damage_mode": damage_mode or "post_decay",
-        "cps": cps, "hit_times": hit_times, "seg_success": seg_success, "D": D,
+        "cps": cps, "saves": saves, "hit_times": hit_times,
+        "seg_success": seg_success, "D": D,
         "hp": ({"H": float(hp_H), "H1": float(hp_H1),
                 "R0": float(hp_R0), "R1": float(hp_R1)}
                if model_key in ("product", "mixed") else None),
@@ -872,38 +1030,87 @@ def run_restart(n_clicks, D, order, card_indices, param_values, param_ids,
     # 冗長な関門の注記。区間通過率がほぼ100%の関門は、そのチェックポイントに到達した
     # 試行をほとんど足切りしていない(手前のより厳しい関門で既に絞られている、または
     # まだ見切る段階でない)= 設定から外しても結果は変わらない。最終(完走)行は除外。
-    redundant = any(sect >= 0.995 for (_lbl, _rem, sect, _cum, is_final) in disp
-                    if not is_final)
+    redundant = any(row[2] >= 0.995 for row in disp if not row[4])
 
     # --- サマリ ---
     base = res["baseline"]
-    rows = [html.Tr([html.Th("チェックポイント(カード)"),
-                     html.Th("最適足切り(残りダメージ)"),
-                     html.Th("区間通過率"), html.Th("累積通過率")])]
-    for i, (label, rem, sect, cumr, is_final) in enumerate(disp):
-        style = {"background": "#fff3e0"} if is_final else {}
-        rows.append(html.Tr([
+    head = [html.Th("チェックポイント(カード)"),
+            html.Th("最適足切り(残りダメージ)"),
+            html.Th("区間通過率"), html.Th("累積通過率")]
+    if saves:
+        head.insert(1, html.Th("凸"))
+    rows = [html.Tr(head)]
+    for i, row in enumerate(disp):
+        label, rem, sect, cumr, is_final, is_save, r_lo, r_hi = row
+        style = {"background": "#fff3e0"} if is_final else (
+            {"background": "#fff3e0"} if is_save else {})
+        rem_txt = f"{rem:,.0f}"
+        if abs(r_hi - r_lo) >= 1:
+            rem_txt += f"  ({r_lo:,.0f}〜{r_hi:,.0f})"
+        cells = [
             html.Td(label if is_final else f"足切り{i + 1}: {label}"),
-            html.Td(f"{rem:,.0f}"),
+            html.Td(rem_txt),
             html.Td(f"{sect:.1%}"),
             html.Td(f"{cumr:.1%}"),
-        ], style=style))
+        ]
+        if saves:
+            cells.insert(1, html.Td("🚩 区切り" if is_save else ""))
+        rows.append(html.Tr(cells, style=style))
     table = html.Table(rows, style={"borderCollapse": "collapse", "marginTop": "6px"},
                        className="restart-table")
-    children = [
-        html.Div(model_note, style={"fontSize": "0.85rem", "color": "#888"}),
-        html.Div([
-            html.Strong("結果: "),
-            f"成功率 {res['success']:.3%} / 平均所要時間 {res['exp_time']:.2f} / "
-            f"スループット {res['throughput']:.3e}(成功/時間)",
-        ]),
-        html.Div(
-            f"足切り無し: 成功率 {base['success']:.3%} / 時間 {base['exp_time']:.2f} / "
-            f"スループット {base['g']:.3e}  →  時短率 {res['speedup']:.2f}x",
-            style={"color": "#555", "fontSize": "0.9rem"},
-        ),
-        table,
-    ]
+    children = [html.Div(model_note, style={"fontSize": "0.85rem", "color": "#888"})]
+    if saves:
+        children += [
+            html.Div([
+                html.Strong("結果: "),
+                f"目標 {D:,.0f} 到達までの期待総時間 {res['exp_time']:.2f}",
+            ]),
+            html.Div(
+                f"凸の中で足切りしない場合: {base['exp_time']:.2f}"
+                f"  →  時短率 {res['speedup']:.2f}x"
+                "(凸区切りの関門は基準側でも最適のまま。"
+                "そこまで外すと到達不能な確定が起きて期待時間が発散するため)",
+                style={"color": "#555", "fontSize": "0.9rem"},
+            ),
+            _blocks_table(res, cps, cum_to_label),
+        ]
+    else:
+        children += [
+            html.Div([
+                html.Strong("結果: "),
+                f"成功率 {res['success']:.3%} / 平均所要時間 {res['exp_time']:.2f} / "
+                f"スループット {res['throughput']:.3e}(成功/時間)",
+            ]),
+            html.Div(
+                f"足切り無し: 成功率 {base['success']:.3%} / 時間 {base['exp_time']:.2f} / "
+                f"スループット {base['g']:.3e}  →  時短率 {res['speedup']:.2f}x",
+                style={"color": "#555", "fontSize": "0.9rem"},
+            ),
+            # 凸区切りありの表示 (期待総時間) と読み比べられるよう併記する。
+            # 「平均所要時間」は 1 試行の時間、こちらは成功までの延べ時間。
+            html.Div(
+                "目標到達までの期待総時間(成功するまで繰り返した場合): "
+                + (f"{1.0 / res['throughput']:.2f}"
+                   if res["throughput"] > 0 else "—"),
+                style={"color": "#555", "fontSize": "0.85rem"},
+            ),
+        ]
+    children.append(table)
+    if saves:
+        children.append(html.Div(
+            "※ 凸区切りありでは、足切りラインは直前の凸区切り時点の累積ダメージに"
+            "依存します。表・図の値は入口分布での代表値で、括弧内が動く幅です"
+            "(前の凸で稼げているほど足切りは上がります)。"
+            "通過率は「その凸の1試行のうち、ここまで通過した割合」で、凸をまたいで"
+            "掛け合わせるものではありません。",
+            style={"color": "#b35900", "fontSize": "0.85rem", "marginTop": "8px"},
+        ))
+        if not res.get("feasible", True):
+            children.append(html.Div(
+                "⚠ 一部の状態から目標に到達できない経路が残っています。"
+                "凸区切りの位置か目標ダメージを見直してください。",
+                style={"color": "#d63031", "fontSize": "0.85rem", "marginTop": "6px"},
+            ))
     if redundant:
         children.append(html.Div(
             "※ 区間通過率がほぼ100%の関門は実質的に足切りしておらず、"
@@ -912,6 +1119,28 @@ def run_restart(n_clicks, D, order, card_indices, param_values, param_ids,
         ))
     summary = html.Div(children)
     return fig, summary, config, sliders
+
+
+def _blocks_table(res, cps, cum_to_label):
+    """凸 (セーブポイントで区切られたブロック) ごとの期待時間・平均試行回数の表。"""
+    ends = [*res.get("save_points", []), None]
+    rows = [html.Tr([html.Th("凸"), html.Th("終わり(カード)"),
+                     html.Th("期待時間"), html.Th("1試行の完走率"),
+                     html.Th("平均試行回数")])]
+    for i, b in enumerate(res.get("blocks", [])):
+        end = ends[i] if i < len(ends) else None
+        label = ("最後まで" if end is None
+                 else cum_to_label.get(str(end), f"{end}ヒット目"))
+        rows.append(html.Tr([
+            html.Td(f"{b['block']}凸目"),
+            html.Td(label),
+            html.Td(f"{b['exp_time']:.2f}"),
+            html.Td(f"{b['completion']:.1%}"),
+            html.Td(f"{b['attempts']:.2f}" if b["attempts"] < 1e6 else "—"),
+        ]))
+    return html.Table(rows,
+                      style={"borderCollapse": "collapse", "margin": "8px 0"},
+                      className="restart-table")
 
 
 # ---------------------------------------------------------------------------
@@ -924,6 +1153,8 @@ def _gate_sliders(cps, rows, cum_to_label, D):
     step = 1
     for k, m in enumerate(cps):
         label = cum_to_label.get(str(m), f"{m}ヒット目")
+        if rows[k].get("save"):
+            label = f"🚩{label}(凸区切り)"
         opt_remain = min(Dmax, max(0, int(round(D - rows[k]["gate"]))))
         sliders.append(html.Div(
             [
@@ -944,6 +1175,66 @@ def _gate_sliders(cps, rows, cum_to_label, D):
         "最適ラインに戻す", id="restart-gate-reset-btn", n_clicks=0,
         style={"cursor": "pointer", "padding": "5px 12px", "marginTop": "2px"}))
     return sliders
+
+
+# ---------------------------------------------------------------------------
+# 多段リスタ: 解析結果が古くなったことの通知
+#   run_restart は「解析実行」ボタンでしか発火しないため、実行後に並べ替え・
+#   パラメータ変更をしても図/表/スライダーは古い前提のまま残る。特に手動調整
+#   グラフは restart-config に焼き付いたカード配列で再計算するので、スライダー
+#   を動かせば「更新されているように見える」のが厄介。指紋の不一致で警告する。
+# ---------------------------------------------------------------------------
+_STALE_STYLE = {
+    "marginTop": "10px", "padding": "8px 10px", "borderRadius": "4px",
+    "background": "#fff3cd", "border": "1px solid #e0a800",
+    "color": "#7a5c00", "fontSize": "0.85rem",
+}
+
+
+@callback(
+    Output("restart-stale-note", "children"),
+    Output("restart-stale-note-interactive", "children"),
+    Input("restart-config", "data"),
+    Input("restart-D", "value"),
+    Input("sorted-indices", "data"),
+    Input("card-indices", "data"),
+    Input({"type": "param", "param": ALL, "index": ALL}, "value"),
+    Input("restart-cp-store", "data"),
+    Input("restart-seg-time-store", "data"),
+    Input("restart-seg-success-store", "data"),
+    Input("restart-save-store", "data"),
+    Input("global-crit-rate", "value"),
+    Input("global-evade-rate", "value"),
+    Input("damage-mode", "value"),
+    Input("hp-mode", "value"),
+    Input("hp-H", "value"),
+    Input("hp-H1", "value"),
+    Input("hp-R0", "value"),
+    Input("hp-R1", "value"),
+    State({"type": "param", "param": ALL, "index": ALL}, "id"),
+)
+def flag_restart_stale(cfg, D, order, card_indices, param_values, cp_store,
+                       seg_times, seg_success, save_store,
+                       global_crit, global_evade,
+                       damage_mode, hp_mode, hp_H, hp_H1, hp_R0, hp_R1,
+                       param_ids):
+    """実行後に入力が変わっていたら「再実行してください」を出す。"""
+    if not cfg or not cfg.get("fingerprint"):
+        return "", ""          # まだ一度も実行していない
+    now = _restart_fingerprint(order, card_indices, param_values, param_ids,
+                               cp_store, seg_times, seg_success, save_store, D,
+                               global_crit, global_evade, damage_mode,
+                               hp_mode, hp_H, hp_H1, hp_R0, hp_R1)
+    if now == cfg["fingerprint"]:
+        return "", ""
+    return (
+        html.Div("⚠ 解析実行のあとにカード(並び順・パラメータ)または設定が"
+                 "変更されています。下の結果は変更前のものです。"
+                 "「解析実行」を押し直してください。", style=_STALE_STYLE),
+        html.Div("⚠ 変更前のカード構成で計算しています。"
+                 "スライダーを動かしても最新の並び順・パラメータは反映されません。"
+                 "先に「解析実行」を押し直してください。", style=_STALE_STYLE),
+    )
 
 
 def _rebuild_for_config(cfg):
@@ -992,7 +1283,29 @@ def update_restart_interactive(slider_values, slider_ids, cfg):
 
     hits = _rebuild_for_config(cfg)
     seg_success = cfg.get("seg_success")
-    if cfg["model"] == "product":
+    saves = cfg.get("saves") or []
+    if saves:
+        try:
+            if cfg["model"] == "product":
+                hp = HPParams(**cfg["hp"])
+                ymix = [y_mixture(mm, hp.beta) for mm in hits]
+                res = restart_save.analyze_product(
+                    ymix, hp, cps, saves, cfg["hit_times"], D,
+                    manual_gates=manual_gates, seg_success=seg_success)
+            elif cfg["model"] == "mixed":
+                hp = HPParams(**cfg["hp"])
+                specs = hit_specs_from_cards(cfg["cards"], cfg["crit"],
+                                             cfg["evade"], cfg["damage_mode"])
+                res = restart_save.analyze_mixed(
+                    specs, hp, cps, saves, cfg["hit_times"], D,
+                    manual_gates=manual_gates, seg_success=seg_success)
+            else:
+                res = restart_save.analyze(
+                    hits, cps, saves, cfg["hit_times"], D,
+                    manual_gates=manual_gates, seg_success=seg_success)
+        except ValueError as exc:
+            return go.Figure(), html.Div(f"⚠ {exc}", style={"color": "#d63031"})
+    elif cfg["model"] == "product":
         hp = HPParams(**cfg["hp"])
         ymix = [y_mixture(mm, hp.beta) for mm in hits]
         res = restart_cos.analyze_product(ymix, hp, cps, cfg["hit_times"], D,
@@ -1018,6 +1331,22 @@ def update_restart_interactive(slider_values, slider_ids, cfg):
     def pct(x):
         return f"{x:.3%}"
     opt_s, opt_g, opt_t = cfg["opt_success"], cfg["opt_throughput"], cfg["opt_exp_time"]
+    base_t = cfg.get("base_exp_time") or 0.0
+    if saves:
+        ratio = (res["exp_time"] / opt_t) if opt_t > 0 else float("nan")
+        speedup = (base_t / res["exp_time"]) if res["exp_time"] > 0 else float("nan")
+        summary = html.Div([
+            html.Div([
+                html.Strong("あなたの設定: "),
+                f"期待総時間 {res['exp_time']:.2f}(時短率 {speedup:.2f}x)",
+            ]),
+            html.Div(
+                f"最適比: 期待総時間 {ratio:.1%}"
+                f"(最適 = {opt_t:.2f}・時短率 {cfg['opt_speedup']:.2f}x)",
+                style={"color": "#555", "fontSize": "0.88rem"},
+            ),
+        ])
+        return fig, summary
     base_g = cfg["base_throughput"]
     speedup = (res["throughput"] / base_g) if base_g > 0 else float("nan")
     d_succ = res["success"] - opt_s
