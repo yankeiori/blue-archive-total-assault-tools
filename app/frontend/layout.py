@@ -584,6 +584,8 @@ def _restart_page() -> html.Div:
                                        "border": "none", "borderRadius": "4px",
                                        "padding": "8px 18px", "cursor": "pointer",
                                        "fontWeight": "bold", "marginTop": "12px"}),
+                    # 解析実行後に入力が変わると「結果が古い」注記が出る (callbacks 側)
+                    html.Div(id="restart-stale-note"),
                 ],
                 style={"background": "#fff0f0", "border": "2px solid #d63031",
                        "borderRadius": "8px", "padding": "14px", "marginBottom": "16px"},
@@ -606,6 +608,7 @@ def _restart_page() -> html.Div:
                         style={"fontSize": "0.82rem", "color": "#666",
                                "marginBottom": "10px"},
                     ),
+                    html.Div(id="restart-stale-note-interactive"),
                     html.Div(id="restart-gate-sliders"),
                     dcc.Loading(
                         [

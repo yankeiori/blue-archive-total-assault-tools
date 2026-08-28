@@ -1,4 +1,5 @@
 import base64
+import hashlib
 import json
 
 import dash
@@ -262,6 +263,35 @@ def _assemble_cards_ordered(order, card_indices, param_values, param_ids):
         by_index.setdefault(pid["index"], {})[pid["param"]] = val
     seq = [i for i in (order or []) if isinstance(i, int)] or list(card_indices or [])
     return [(i, by_index[i]) for i in seq if i in by_index]
+
+
+def _restart_fingerprint(order, card_indices, param_values, param_ids, cp_store,
+                         seg_times, seg_success, D, global_crit, global_evade,
+                         damage_mode, hp_mode, hp_H, hp_H1, hp_R0, hp_R1) -> str:
+    """足切り最適化の結果を左右する入力だけを 1 本の指紋にまとめる。
+
+    run_restart は実行ボタンでしか発火しないため、実行後にカードを並べ替えたり
+    パラメータを変えたりしても図・表は古いまま残る。実行時の指紋を restart-config
+    に載せておき、現在の指紋と突き合わせて「再実行してください」を出すのに使う。
+
+    カード名 (メモ) は数値結果に影響しないので含めない (入力中の点滅を避ける)。
+    HP 依存パラメータは hp_mode が on のときだけ効くので、off なら無視する。
+    """
+    ordered = _assemble_cards_ordered(order, card_indices, param_values, param_ids)
+    payload = {
+        "cards": [{k: params.get(k) for k in _CARD_PARAMS} for _idx, params in ordered],
+        "cps": sorted({int(x) for x in (cp_store or [])}),
+        "seg_times": seg_times or {},
+        "seg_success": seg_success or {},
+        "D": D,
+        "crit": global_crit,
+        "evade": global_evade,
+        "damage_mode": damage_mode,
+        "hp_mode": hp_mode,
+        "hp": [hp_H, hp_H1, hp_R0, hp_R1] if hp_mode == "on" else None,
+    }
+    blob = json.dumps(payload, sort_keys=True, default=str)
+    return hashlib.md5(blob.encode("utf-8")).hexdigest()
 
 
 # ---------------------------------------------------------------------------
@@ -724,6 +754,10 @@ def run_restart(n_clicks, D, order, card_indices, param_values, param_ids,
     if not n_clicks:
         raise PreventUpdate
 
+    # 指紋用に、正規化前 (float 化・or {} 前) の生値を控えておく。flag_restart_stale
+    # 側は生値しか持たないので、ここで正規化後の値を混ぜると常に不一致になる。
+    D_raw, seg_times_raw, seg_success_raw = D, seg_times, seg_success_store
+
     empty = go.Figure()
 
     def err(msg):
@@ -851,6 +885,11 @@ def run_restart(n_clicks, D, order, card_indices, param_values, param_ids,
     # --- リスタライン手動調整用の設定 (Store) と スライダー ---
     config = {
         "model": model_key,
+        # 実行時点の入力の指紋。以後の変更検知 (flag_restart_stale) に使う。
+        "fingerprint": _restart_fingerprint(
+            order, card_indices, param_values, param_ids, cp_store,
+            seg_times_raw, seg_success_raw, D_raw, global_crit, global_evade,
+            damage_mode, hp_mode, hp_H, hp_H1, hp_R0, hp_R1),
         "cards": cards, "crit": float(global_crit or 0),
         "evade": float(global_evade or 0), "damage_mode": damage_mode or "post_decay",
         "cps": cps, "hit_times": hit_times, "seg_success": seg_success, "D": D,
@@ -944,6 +983,64 @@ def _gate_sliders(cps, rows, cum_to_label, D):
         "最適ラインに戻す", id="restart-gate-reset-btn", n_clicks=0,
         style={"cursor": "pointer", "padding": "5px 12px", "marginTop": "2px"}))
     return sliders
+
+
+# ---------------------------------------------------------------------------
+# 多段リスタ: 解析結果が古くなったことの通知
+#   run_restart は「解析実行」ボタンでしか発火しないため、実行後に並べ替え・
+#   パラメータ変更をしても図/表/スライダーは古い前提のまま残る。特に手動調整
+#   グラフは restart-config に焼き付いたカード配列で再計算するので、スライダー
+#   を動かせば「更新されているように見える」のが厄介。指紋の不一致で警告する。
+# ---------------------------------------------------------------------------
+_STALE_STYLE = {
+    "marginTop": "10px", "padding": "8px 10px", "borderRadius": "4px",
+    "background": "#fff3cd", "border": "1px solid #e0a800",
+    "color": "#7a5c00", "fontSize": "0.85rem",
+}
+
+
+@callback(
+    Output("restart-stale-note", "children"),
+    Output("restart-stale-note-interactive", "children"),
+    Input("restart-config", "data"),
+    Input("restart-D", "value"),
+    Input("sorted-indices", "data"),
+    Input("card-indices", "data"),
+    Input({"type": "param", "param": ALL, "index": ALL}, "value"),
+    Input("restart-cp-store", "data"),
+    Input("restart-seg-time-store", "data"),
+    Input("restart-seg-success-store", "data"),
+    Input("global-crit-rate", "value"),
+    Input("global-evade-rate", "value"),
+    Input("damage-mode", "value"),
+    Input("hp-mode", "value"),
+    Input("hp-H", "value"),
+    Input("hp-H1", "value"),
+    Input("hp-R0", "value"),
+    Input("hp-R1", "value"),
+    State({"type": "param", "param": ALL, "index": ALL}, "id"),
+)
+def flag_restart_stale(cfg, D, order, card_indices, param_values, cp_store,
+                       seg_times, seg_success, global_crit, global_evade,
+                       damage_mode, hp_mode, hp_H, hp_H1, hp_R0, hp_R1,
+                       param_ids):
+    """実行後に入力が変わっていたら「再実行してください」を出す。"""
+    if not cfg or not cfg.get("fingerprint"):
+        return "", ""          # まだ一度も実行していない
+    now = _restart_fingerprint(order, card_indices, param_values, param_ids,
+                               cp_store, seg_times, seg_success, D,
+                               global_crit, global_evade, damage_mode,
+                               hp_mode, hp_H, hp_H1, hp_R0, hp_R1)
+    if now == cfg["fingerprint"]:
+        return "", ""
+    return (
+        html.Div("⚠ 解析実行のあとにカード(並び順・パラメータ)または設定が"
+                 "変更されています。下の結果は変更前のものです。"
+                 "「解析実行」を押し直してください。", style=_STALE_STYLE),
+        html.Div("⚠ 変更前のカード構成で計算しています。"
+                 "スライダーを動かしても最新の並び順・パラメータは反映されません。"
+                 "先に「解析実行」を押し直してください。", style=_STALE_STYLE),
+    )
 
 
 def _rebuild_for_config(cfg):
