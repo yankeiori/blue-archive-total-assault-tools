@@ -4,11 +4,14 @@
 実行後、ブラウザで http://localhost:8050 を開いて使用する。
 
 使い方:
+    uv run python third_party_licenses.py
     uv run python build.py
 """
 
-import PyInstaller.__main__
+import shutil
 import sys
+
+import PyInstaller.__main__
 
 args = [
     "main.py",
@@ -18,6 +21,9 @@ args = [
     # Dash/Flask の assets と docs を同梱
     "--add-data=assets:assets",
     "--add-data=docs:docs",
+    # ライセンス表記 (THIRD_PARTY_LICENSES.txt は third_party_licenses.py で事前生成)
+    "--add-data=LICENSE:.",
+    "--add-data=THIRD_PARTY_LICENSES.txt:.",
     # 隠しインポート (PyInstaller が自動検出できないもの)
     "--hidden-import=app",
     "--hidden-import=app.frontend",
@@ -45,3 +51,7 @@ if sys.platform == "win32":
     args = [a.replace(":", ";", 1) if a.startswith("--add-data=") else a for a in args]
 
 PyInstaller.__main__.run(args)
+
+# 配布物として exe と並べてライセンス表記を置く
+for name in ("LICENSE", "THIRD_PARTY_LICENSES.txt"):
+    shutil.copy(name, "dist")

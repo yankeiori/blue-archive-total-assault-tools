@@ -1,8 +1,10 @@
 [project]
 name = "damage-cutoff-simulator"
 version = "0.1.0"
-description = "Add your description here"
+description = "ブルーアーカイブ総力戦・大決戦向けのダメージ分布・足切りライン・スキル順計算ツール"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.12"
 dependencies = [
     "dash>=4.1.0",

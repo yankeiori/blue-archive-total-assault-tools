@@ -5,6 +5,12 @@ docs/skill_order_theory.md の実測表を再現するスクリプト。
 
     python experiments/skill_order_bench.py          # 素朴法との比較も行う
     python experiments/skill_order_bench.py --fast   # 素朴法(10! 全列挙)を省く
+    python experiments/skill_order_bench.py --only BG        # B 節と G 節だけ
+    python experiments/skill_order_bench.py --fast --only A  # 組み合わせも可
+
+--fast が省くのは素朴法だけで、探索側は省かない。全節だと --fast でも 2 分弱
+かかる (B 節の巡回98手だけで約 70 秒) ので、一部だけ見たいときは --only を使う。
+節の記号は出力の見出し (A〜I) と同じ。
 
 素朴法は tests/test_skill_order.py の参照実装 _ref_solve をそのまま使う
 (初期配置を全列挙して前向きにシミュレートする、正しいが遅い実装)。
@@ -183,9 +189,8 @@ def check_bound(trials=400, seed=20260818):
     return trials, solvable, worst_n, worst_nodes
 
 
-def main():
-    with_naive = "--fast" not in sys.argv
-
+# --- 節 ---------------------------------------------------------------------
+def sec_a(with_naive):
     print("== A. 素朴法との比較 (循環手順 Step(i mod n)、枠指定なし) ==")
     for label, n, h, m in [("6枚/手札3・12手", 6, 3, 12),
                            ("10枚/手札5・4手", 10, 5, 4),
@@ -201,20 +206,26 @@ def main():
                   f"(圧縮 {q['out'] / max(r['N'], 1):.0f}x, "
                   f"高速化 {q['time'] / max(r['time'], 1e-9):.0f}x)")
 
-    print("\n== B. 長い手順 (10枚/手札5、循環98手) ==")
+
+def sec_b(with_naive):
+    print("== B. 長い手順 (10枚/手札5、循環98手) ==")
     show("98手・枠指定なし", lazy(10, set(), cyc(10, 98), 5))
     p = cyc(10, 98)
     p[0] = so.Step(0, slot=1)
     show("98手・1手目を枠固定", lazy(10, set(), p, 5))
 
-    print("\n== C. 枠指定の効果 (10枚/手札5・18手、先頭 k 手の枠を固定) ==")
+
+def sec_c(with_naive):
+    print("== C. 枠指定の効果 (10枚/手札5・18手、先頭 k 手の枠を固定) ==")
     base = cyc(10, 18)
     for k in range(6):
         p = [so.Step(s.skill, slot=(i + 1 if i < k else None))
              for i, s in enumerate(base)]
         show(f"固定 {k} 手", lazy(10, set(), p, 5))
 
-    print("\n== D. 複製 + ドロー (10枚/手札5、複製=0) ==")
+
+def sec_d(with_naive):
+    print("== D. 複製 + ドロー (10枚/手札5、複製=0) ==")
     cop = [so.Step(0, copy_target=1),
            so.Step(1, use_copy=True, draw=True),
            so.Step(1), so.Step(2), so.Step(3), so.Step(4),
@@ -225,16 +236,22 @@ def main():
         q = naive(10, {0}, cop, 5)
         print(f"{'':<24} 素朴: 出力={q['out']:>9,} t={q['time']:.2f}s")
 
-    print("\n== E. ワイルドカードのみ (10枚/手札5、複製=0) ==")
+
+def sec_e(with_naive):
+    print("== E. ワイルドカードのみ (10枚/手札5、複製=0) ==")
     for k in range(1, 5):
         show(f"ワイルド{k}手", lazy(10, {0}, [so.Step(None)] * k, 5))
 
-    print("\n== F. max_results の効果 (10枚/手札5・18手) ==")
+
+def sec_f(with_naive):
+    print("== F. max_results の効果 (10枚/手札5・18手) ==")
     for mr in [50, 200, 500, 1000, 5000, 20000, None]:
         r = lazy(10, set(), cyc(10, 18), 5, max_results=mr)
         show(f"max_results={mr}", r)
 
-    print("\n== G. 実 TL (tl_sample/貫通コクマー_123用調整.txt) ==")
+
+def sec_g(with_naive):
+    print("== G. 実 TL (tl_sample/貫通コクマー_123用調整.txt) ==")
     names, plan, warns = tl_plan()
     print(f"手順長 m={len(plan)}、読み取り警告 {len(warns)} 件")
     r = lazy(10, {2}, plan, 5)
@@ -245,7 +262,9 @@ def main():
     r2 = lazy(10, {2}, plan[:d], 5)
     show(f"TL 先頭{d}手", r2)
 
-    print("\n== I. ワイルドカード無しの上界 (定理 5.7) の検証 ==")
+
+def sec_i(with_naive):
+    print("== I. ワイルドカード無しの上界 (定理 5.7) の検証 ==")
     trials, solvable, wn, wnodes = check_bound()
     print(f"乱択 {trials} 手順 (うち解あり {solvable}) すべてで "
           f"N <= B かつ nodes <= (m+1)B")
@@ -258,7 +277,9 @@ def main():
         print(f"  巡回 {label}: N={r['N']:,} B={b:,} (等号) "
               f"nodes={r['nodes']:,} <= {(m + 1) * b:,}")
 
-    print("\n== H. 初期配置の種類数 ==")
+
+def sec_h(with_naive):
+    print("== H. 初期配置の種類数 ==")
     for label, n, h, m in [("6枚/手札3・12手", 6, 3, 12),
                            ("10枚/手札5・4手", 10, 5, 4)]:
         res, _ = so.solve(n, set(), cyc(n, m), hand_size=h,
@@ -268,6 +289,58 @@ def main():
         print(f"{label:<24} 解={len(res):,} Σcount={so.total_layouts(res):,} "
               f"distinct={cnt:,}{'' if exact else '+'} "
               f"t={time.perf_counter() - t:.2f}s")
+
+
+# 出力の見出しと同じ並び (I 節は定理の検証なので H 節の前に置く)。
+SECTIONS = {"A": sec_a, "B": sec_b, "C": sec_c, "D": sec_d, "E": sec_e,
+            "F": sec_f, "G": sec_g, "I": sec_i, "H": sec_h}
+ORDER = "ABCDEFGIH"
+
+
+# --- 実行 -------------------------------------------------------------------
+def parse_only(argv):
+    """--only BG / --only=B,G を節の記号リストにする。無指定なら None。"""
+    keys = None
+    for i, a in enumerate(argv):
+        if a == "--only" and i + 1 < len(argv):
+            keys = argv[i + 1]
+        elif a.startswith("--only="):
+            keys = a[len("--only="):]
+    if keys is None:
+        return None
+    sel = [c for c in keys.upper() if c.isalpha()]
+    unknown = [c for c in sel if c not in SECTIONS]
+    if unknown:
+        raise SystemExit(f"--only: 節 {''.join(unknown)} は無い "
+                         f"(使えるのは {ORDER})")
+    if not sel:
+        raise SystemExit("--only: 節を1つ以上指定する")
+    return sel
+
+
+def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if "-h" in argv or "--help" in argv:
+        print(__doc__.strip())
+        return
+
+    # 途中で Ctrl-C やタイムアウトで止められても、そこまでの結果が残るように
+    # 行バッファにする。パイプやリダイレクト先だと既定はブロックバッファで、
+    # 4KB たまるまで1行も出ない。B 節だけで1分近くかかるので、それまでの出力
+    # がまるごと捨てられて「無出力のままハングした」ように見えてしまう。
+    sys.stdout.reconfigure(line_buffering=True)
+
+    with_naive = "--fast" not in argv
+    only = parse_only(argv)
+    order = [k for k in ORDER if only is None or k in only]
+    if only is None:
+        print("全節を実行する。--fast でも 2 分弱かかる "
+              "(B 節の巡回98手だけで約 70 秒)。"
+              "一部だけ見るときは --only BG のように指定する。\n")
+    for j, k in enumerate(order):
+        if j:
+            print()
+        SECTIONS[k](with_naive)
 
 
 if __name__ == "__main__":
