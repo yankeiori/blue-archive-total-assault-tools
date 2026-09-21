@@ -4,6 +4,8 @@ from dash import ALL, Input, Output, State
 from app import app as application, OCR_ENABLED
 from app.frontend.layout import create_layout
 import app.frontend.callbacks  # noqa: F401 - コールバック登録
+# 入力の自動保存 / 全クリア。callbacks.py と出力が重なるので後に登録する。
+import app.frontend.persist  # noqa: F401,E402 - コールバック登録
 
 application.layout = create_layout()
 
@@ -172,6 +174,64 @@ application.clientside_callback(
     """,
     Output("sim-sidebar", "className"),
     Input("sidebar-toggle", "n_clicks"),
+    prevent_initial_call=True,
+)
+
+# --- 入力の自動保存 (ブラウザの localStorage) ---
+# 引数の並びは assets/autosave.js の FIELDS と 1:1 で対応する。
+# 片方だけ並べ替えるとスナップショットの中身がずれるので必ず両方を直すこと。
+# 復元は app/frontend/persist.py が担当する。
+application.clientside_callback(
+    "dash_clientside.persist.collect",
+    Output("autosave-store", "data", allow_duplicate=True),
+    # --- ダメージシミュレータ ---
+    Input({"type": "param", "param": ALL, "index": ALL}, "value"),
+    Input({"type": "memo", "index": ALL}, "value"),
+    Input("sorted-indices", "data"),
+    Input("card-indices", "data"),
+    Input("next-index", "data"),
+    Input("target-damage", "value"),
+    Input("global-crit-rate", "value"),
+    Input("global-evade-rate", "value"),
+    Input("global-stability", "value"),
+    Input("calc-method", "value"),
+    Input("damage-mode", "value"),
+    Input("hp-mode", "value"),
+    Input("hp-H", "value"),
+    Input("hp-H1", "value"),
+    Input("hp-R0", "value"),
+    Input("hp-R1", "value"),
+    Input("text-input", "value"),
+    # --- 足切りライン最適化 ---
+    Input("restart-D", "value"),
+    Input("restart-cp-store", "data"),
+    Input("restart-seg-time-store", "data"),
+    Input("restart-seg-success-store", "data"),
+    Input("restart-save-store", "data"),
+    # --- スキル順探索 ---
+    Input("so-hand-size", "value"),
+    Input("so-card-count", "value"),
+    Input("so-limit", "value"),
+    Input("so-tl-text", "value"),
+    Input({"type": "so-name", "index": ALL}, "value"),
+    Input({"type": "so-copier", "index": ALL}, "value"),
+    Input({"type": "so-step-skill", "index": ALL}, "value"),
+    Input({"type": "so-step-target", "index": ALL}, "value"),
+    Input({"type": "so-step-slot", "index": ALL}, "value"),
+    Input({"type": "so-step-draw", "index": ALL}, "value"),
+    Input({"type": "so-step-memo", "index": ALL}, "value"),
+    Input("so-step-order", "data"),
+    Input("so-next-step", "data"),
+    Input({"type": "so-con-type", "index": ALL}, "value"),
+    Input({"type": "so-con-steps", "index": ALL}, "value"),
+    Input("so-next-con", "data"),
+    # --- 値と添字を対応づけるための id 群 ---
+    State({"type": "param", "param": ALL, "index": ALL}, "id"),
+    State({"type": "memo", "index": ALL}, "id"),
+    State({"type": "so-step-skill", "index": ALL}, "id"),
+    State({"type": "so-con-type", "index": ALL}, "id"),
+    # --- 復元が済むまで保存しないためのフラグ ---
+    State("persist-armed", "data"),
     prevent_initial_call=True,
 )
 

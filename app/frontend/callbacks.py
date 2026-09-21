@@ -1438,16 +1438,26 @@ def _so_error(msg):
     Output("so-card-count", "options"),
     Output("so-card-count", "value"),
     Input("so-hand-size", "value"),
+    Input("so-restore-count", "data"),
     State("so-card-count", "value"),
 )
-def so_sync_card_count(hand_size_raw, count_raw):
-    """モードに応じてカード枚数の選択肢を切り替える(決戦は10枚まで)。"""
+def so_sync_card_count(hand_size_raw, restore_count, count_raw):
+    """モードに応じてカード枚数の選択肢を切り替える(決戦は10枚まで)。
+
+    自動保存からの復元 / 全クリア (app/frontend/persist.py) はモードと枚数を
+    同時に戻す。so-hand-size だけを見ると「モード切替 → 既定枚数」の分岐に
+    吸い込まれて指定した枚数が消えるので、復元側は so-restore-count 経由で
+    枚数を渡す ({"count": "6", "nonce": ...})。
+    """
     hand_size = _so_int(hand_size_raw, 3)
     options = so_card_count_options(hand_size)
     hi = SO_MAX_CARDS if hand_size >= 5 else SO_DEFAULT_CARDS
     count = _so_int(count_raw, SO_DEFAULT_CARDS)
+    triggered = {t["prop_id"] for t in (ctx.triggered or [])}
+    if "so-restore-count.data" in triggered and isinstance(restore_count, dict):
+        count = _so_int(restore_count.get("count"), SO_DEFAULT_CARDS)
     # モード切替時は既定枚数(通常6 / 決戦10)へ、範囲外なら丸める
-    if ctx.triggered_id == "so-hand-size":
+    elif "so-hand-size.value" in triggered:
         count = hi
     return options, str(min(max(count, 1), hi))
 
