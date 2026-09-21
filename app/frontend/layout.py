@@ -351,8 +351,8 @@ def _text_panel() -> html.Div:
 def _io_panel() -> html.Div:
     """入力情報のエクスポート / インポートパネル(カード + 全体設定 + 多段リスタ設定)。
 
-    入力はブラウザ(localStorage)にも自動保存される (app/frontend/persist.py)
-    ため、初期状態に戻す手段として「入力を全クリア」もここに置く。
+    入力はブラウザ(localStorage)にも自動保存される (app/frontend/persist.py)。
+    初期状態に戻す「入力を全クリア」はカード一覧の下 (_clear_all_button)。
     """
     return html.Div(
         [
@@ -392,27 +392,6 @@ def _io_panel() -> html.Div:
                 style={"display": "flex", "flexDirection": "column", "gap": "10px",
                        "alignItems": "stretch", "marginTop": "8px"},
             ),
-            dcc.ConfirmDialogProvider(
-                html.Button(
-                    "🗑 入力を全クリア",
-                    id="clear-all-btn",
-                    n_clicks=0,
-                    title="全カード・全体設定・足切りライン最適化・スキル順探索の入力を"
-                          "初期状態に戻し、ブラウザへの自動保存も消去します",
-                    style={
-                        "background": "#fff", "color": "#c0392b",
-                        "border": "1px solid #c0392b", "borderRadius": "6px",
-                        "padding": "6px 14px", "cursor": "pointer",
-                        "width": "100%", "marginTop": "10px",
-                        "fontSize": "0.85rem",
-                    },
-                ),
-                id="clear-all-confirm",
-                message="すべての入力(カード・全体設定・足切りライン最適化・"
-                        "スキル順探索)を消して初期状態に戻します。\n"
-                        "残しておきたい場合は先にエクスポートしてください。\n"
-                        "よろしいですか?",
-            ),
             html.Div(
                 id="io-status",
                 style={"fontSize": "0.82rem", "color": "#666", "marginTop": "6px", "minHeight": "1.2em"},
@@ -423,6 +402,35 @@ def _io_panel() -> html.Div:
             "border": "1px solid #2d8659", "borderRadius": "8px", "padding": "12px",
             "marginBottom": "16px", "background": "#f1faf4",
         },
+    )
+
+
+def _clear_all_button() -> dcc.ConfirmDialogProvider:
+    """入力を全クリアするボタン (確認ダイアログ付き)。
+
+    3 ページ分の入力とブラウザへの自動保存をまとめて消す
+    (app/frontend/persist.py)。
+    """
+    return dcc.ConfirmDialogProvider(
+        html.Button(
+            "🗑 入力を全クリア",
+            id="clear-all-btn",
+            n_clicks=0,
+            title="全カード・全体設定・足切りライン最適化・スキル順探索の入力を"
+                  "初期状態に戻し、ブラウザへの自動保存も消去します",
+            style={
+                "background": "#fff", "color": "#c0392b",
+                "border": "1px solid #c0392b", "borderRadius": "6px",
+                "padding": "6px 14px", "cursor": "pointer",
+                "marginLeft": "auto", "fontSize": "0.85rem",
+                "whiteSpace": "nowrap",
+            },
+        ),
+        id="clear-all-confirm",
+        message="すべての入力(カード・全体設定・足切りライン最適化・"
+                "スキル順探索)を消して初期状態に戻します。\n"
+                "残しておきたい場合は先にエクスポートしてください。\n"
+                "よろしいですか?",
     )
 
 
@@ -1157,8 +1165,12 @@ def create_layout() -> html.Div:
                                         n_clicks=0,
                                         style={"marginLeft": "12px"},
                                     ),
+                                    # 実行ボタンから離して右端に置く (誤爆防止)
+                                    _clear_all_button(),
                                 ],
-                                style={"marginBottom": "16px"},
+                                style={"display": "flex", "alignItems": "center",
+                                       "flexWrap": "wrap", "gap": "8px",
+                                       "marginBottom": "16px"},
                             ),
                             dcc.Loading(
                                 [
