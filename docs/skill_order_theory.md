@@ -557,7 +557,11 @@ $\mathcal N(18)|_{h=5} = 4{,}019{,}531$、$\mathcal N(98)|_{h=5} = 34{,}019{,}53
 ```
 python experiments/skill_order_bench.py          # 素朴法との比較込み
 python experiments/skill_order_bench.py --fast   # 素朴法(10! 全列挙)を省く
+python experiments/skill_order_bench.py --only BG  # 見出しの記号で節を絞る
 ```
+
+`--fast` が省くのは素朴法だけで、探索側は省かない。全節を通すと `--fast` でも 2 分弱かかる
+(表 B の巡回98手だけで約 70 秒)。1つの表だけ引き直したいときは `--only` を使う。
 
 「nodes」は `_dfs` の呼び出し回数、「$\Sigma$count」は $|\mathcal S|$(= `total_layouts`)。
 

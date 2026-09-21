@@ -14,8 +14,21 @@ else:
 
 _MANUAL_MD = (_BASE_DIR / "docs" / "manual.md").read_text(encoding="utf-8")
 
+# 入力欄の初期値。レイアウト生成と「入力を全クリア」(app/frontend/persist.py) で
+# 共有する。片方だけ変えるとクリア後の状態が初期表示とずれるので必ずここを直す。
 DEFAULT_CRIT_RATE = 60
 DEFAULT_EVADE_RATE = 0
+DEFAULT_TARGET_DAMAGE = 1_000_000
+DEFAULT_STABILITY = None
+DEFAULT_CALC_METHOD = "cos"
+DEFAULT_DAMAGE_MODE = "post_decay"
+DEFAULT_HP_MODE = "off"
+DEFAULT_HP_H = 1_000_000
+DEFAULT_HP_H1 = 1_000_000
+DEFAULT_HP_R1 = 2
+DEFAULT_HP_R0 = 1
+DEFAULT_SO_HAND_SIZE = "3"
+DEFAULT_SO_LIMIT = 60
 
 LABEL_STYLE = {"fontSize": "0.85rem", "whiteSpace": "nowrap"}
 
@@ -180,7 +193,7 @@ def _top_settings_panel() -> html.Div:
             html.Div(
                 [
                     html.Strong("目標ダメージ"),
-                    dcc.Input(id="target-damage", type="number", value=1000000, style={"width": "100%", "marginTop": "6px"}),
+                    dcc.Input(id="target-damage", type="number", value=DEFAULT_TARGET_DAMAGE, style={"width": "100%", "marginTop": "6px"}),
                 ],
                 style={**box_style, "background": "#fff5f5"},
             ),
@@ -336,10 +349,18 @@ def _text_panel() -> html.Div:
 
 
 def _io_panel() -> html.Div:
-    """入力情報のエクスポート / インポートパネル(カード + 全体設定 + 多段リスタ設定)。"""
+    """入力情報のエクスポート / インポートパネル(カード + 全体設定 + 多段リスタ設定)。
+
+    入力はブラウザ(localStorage)にも自動保存される (app/frontend/persist.py)
+    ため、初期状態に戻す手段として「入力を全クリア」もここに置く。
+    """
     return html.Div(
         [
             html.Strong("💾 入力の保存 / 読込", style={"fontSize": "0.95rem"}),
+            html.Div(
+                "入力はこのブラウザに自動保存され、次に開いたときに復元されます。",
+                style={"fontSize": "0.78rem", "color": "#666", "marginTop": "4px"},
+            ),
             html.Div(
                 [
                     html.Button(
@@ -370,6 +391,27 @@ def _io_panel() -> html.Div:
                 ],
                 style={"display": "flex", "flexDirection": "column", "gap": "10px",
                        "alignItems": "stretch", "marginTop": "8px"},
+            ),
+            dcc.ConfirmDialogProvider(
+                html.Button(
+                    "🗑 入力を全クリア",
+                    id="clear-all-btn",
+                    n_clicks=0,
+                    title="全カード・全体設定・足切りライン最適化・スキル順探索の入力を"
+                          "初期状態に戻し、ブラウザへの自動保存も消去します",
+                    style={
+                        "background": "#fff", "color": "#c0392b",
+                        "border": "1px solid #c0392b", "borderRadius": "6px",
+                        "padding": "6px 14px", "cursor": "pointer",
+                        "width": "100%", "marginTop": "10px",
+                        "fontSize": "0.85rem",
+                    },
+                ),
+                id="clear-all-confirm",
+                message="すべての入力(カード・全体設定・足切りライン最適化・"
+                        "スキル順探索)を消して初期状態に戻します。\n"
+                        "残しておきたい場合は先にエクスポートしてください。\n"
+                        "よろしいですか?",
             ),
             html.Div(
                 id="io-status",
@@ -411,7 +453,7 @@ def _sidebar() -> html.Div:
                     {"label": "なし（合計＝和モデル）", "value": "off"},
                     {"label": "あり（ミカ型。カード別に混在可）", "value": "on"},
                 ],
-                value="off",
+                value=DEFAULT_HP_MODE,
                 style={"display": "flex", "flexDirection": "column", "gap": "4px", "marginTop": "6px"},
             ),
             html.Div(
@@ -427,10 +469,10 @@ def _sidebar() -> html.Div:
                                "border": "1px solid #f0b060", "borderRadius": "6px",
                                "padding": "6px 8px", "marginTop": "6px"},
                     ),
-                    hp_field("敵の最大HP", "hp-H", 1000000),
-                    hp_field("開始時HP", "hp-H1", 1000000),
-                    hp_field("HP満タン時の倍率 (R1)", "hp-R1", 2),
-                    hp_field("HP0時の倍率 (R0)", "hp-R0", 1),
+                    hp_field("敵の最大HP", "hp-H", DEFAULT_HP_H),
+                    hp_field("開始時HP", "hp-H1", DEFAULT_HP_H1),
+                    hp_field("HP満タン時の倍率 (R1)", "hp-R1", DEFAULT_HP_R1),
+                    hp_field("HP0時の倍率 (R0)", "hp-R0", DEFAULT_HP_R0),
                 ],
                 id="hp-params",
                 style={"display": "none", "marginTop": "4px"},
@@ -449,7 +491,7 @@ def _sidebar() -> html.Div:
                     {"label": "COS法（準厳密・推奨）", "value": "cos"},
                     {"label": "モンテカルロ", "value": "mc"},
                 ],
-                value="cos",
+                value=DEFAULT_CALC_METHOD,
                 style={"display": "flex", "flexDirection": "column", "gap": "4px", "marginTop": "6px"},
             ),
         ],
@@ -466,7 +508,7 @@ def _sidebar() -> html.Div:
                     {"label": "減衰考慮済み（推奨）", "value": "post_decay"},
                     {"label": "減衰考慮前", "value": "pre_decay"},
                 ],
-                value="post_decay",
+                value=DEFAULT_DAMAGE_MODE,
                 style={"display": "flex", "flexDirection": "column", "gap": "4px", "marginTop": "6px"},
             ),
         ],
@@ -480,7 +522,7 @@ def _sidebar() -> html.Div:
             dcc.Input(
                 id="global-stability",
                 type="number",
-                value=None,
+                value=DEFAULT_STABILITY,
                 placeholder="未入力で無効",
                 style={"width": "100%", "marginTop": "6px"},
             ),
@@ -575,7 +617,8 @@ def _restart_page() -> html.Div:
                     html.Div(
                         [
                             html.Label("目標ダメージ D", style=LABEL_STYLE),
-                            dcc.Input(id="restart-D", type="number", value=1_000_000,
+                            dcc.Input(id="restart-D", type="number",
+                                      value=DEFAULT_TARGET_DAMAGE,
                                       min=0, step="any",
                                       style={"width": "200px", "marginLeft": "8px"}),
                         ],
@@ -840,7 +883,7 @@ def _skill_order_page() -> html.Div:
                             {"label": "通常戦(手札3枚)", "value": "3"},
                             {"label": "制約解除決戦(手札5枚)", "value": "5"},
                         ],
-                        value="3",
+                        value=DEFAULT_SO_HAND_SIZE,
                         clearable=False,
                         searchable=False,
                         style={"width": "200px", "margin": "0 16px 0 8px"},
@@ -960,7 +1003,8 @@ def _skill_order_page() -> html.Div:
                 [
                     html.Label("表示件数上限", style=LABEL_STYLE,
                                title="この件数(最低500件)が見つかった時点で探索を打ち切ります"),
-                    dcc.Input(id="so-limit", type="number", value=60, min=1, max=1000,
+                    dcc.Input(id="so-limit", type="number", value=DEFAULT_SO_LIMIT,
+                              min=1, max=1000,
                               style={"width": "90px", "margin": "0 16px 0 8px"}),
                     html.Button("探索実行", id="so-run-btn", n_clicks=0,
                                 style={"background": "#d63031", "color": "white",
@@ -1208,6 +1252,19 @@ def create_layout() -> html.Div:
             dcc.Store(id="restart-save-store", data=[]),
             # 多段リスタ: 総ヒット数 (区間描画用)
             dcc.Store(id="restart-nhits", data=0),
+            # --- 入力の自動保存 (app/frontend/persist.py) ---
+            # 全入力のスナップショット。ブラウザを閉じても残る。
+            dcc.Store(id="autosave-store", storage_type="local"),
+            # 復元が済むまで自動保存を止めるためのフラグ (空の初期状態で
+            # 前回の入力を上書きしないようにする)。
+            dcc.Store(id="persist-armed", data=False),
+            # 読込直後に 1 回だけ発火して復元コールバックを起こすタイマー。
+            # autosave-store が localStorage から読み込まれるのを待つ。
+            dcc.Interval(id="persist-restore-tick", interval=400,
+                         max_intervals=1),
+            # 復元したいカード枚数 (so-card-count は so_sync_card_count が
+            # 所有しているので、値を直接書かずここ経由で渡す)。
+            dcc.Store(id="so-restore-count", data=None),
         ],
         className="app-root",
         style={"maxWidth": "1200px", "margin": "0 auto", "padding": "20px", "fontFamily": "sans-serif"},
