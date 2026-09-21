@@ -43,7 +43,14 @@ def split_segments(hit_mixtures, checkpoints):
 # 期待値演算 (増分との畳み込み)
 # ---------------------------------------------------------------------------
 def _segment_nodes(seg, n_nodes=512):
-    """セグメント増分の数値積分ノード(offset, weight)。weight は確率(合計1に正規化)。"""
+    """セグメント増分の数値積分ノード(offset, weight)。weight は確率(合計1に正規化)。
+
+    分布が厳密なノード表現 (quad_nodes) を持つならそれを使う。蓄積スキル
+    (app/backend/accumulate.py) のセル質量表現がこれにあたり、密度の等間隔標本化より
+    質量・平均が正確になる。
+    """
+    if hasattr(seg, "quad_nodes"):
+        return seg.quad_nodes(n_nodes)
     o = np.linspace(seg.support_lo, seg.support_hi, n_nodes)
     w = seg.pdf(o)
     s = w.sum()

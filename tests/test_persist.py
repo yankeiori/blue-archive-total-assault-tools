@@ -50,6 +50,7 @@ def _snapshot(**over):
         "calc_method": "mc", "damage_mode": "pre_decay", "hp_mode": "on",
         "hp_H": 30000000, "hp_H1": 29000000, "hp_R0": 1.5, "hp_R1": 2.5,
         "text_input": "貼り付け途中のテキスト",
+        "text_prefix": "ミカ1射目",
         "restart_D": 4321000, "restart_cp": [5],
         "restart_seg_time": {"0": 1.0, "5": 2.0},
         "restart_seg_success": {"0": 100.0, "5": 80.0},
@@ -144,6 +145,7 @@ def test_restore_keeps_globals_and_cutoff_settings():
     assert (state["hp_H"], state["hp_H1"], state["hp_R0"], state["hp_R1"]) \
         == (30000000, 29000000, 1.5, 2.5)
     assert state["text_input"] == "貼り付け途中のテキスト"
+    assert state["text_prefix"] == "ミカ1射目"
     assert state["restart_cp"] == [5]
     assert state["restart_seg_time"] == {"0": 1.0, "5": 2.0}
     assert state["restart_seg_success"] == {"0": 100.0, "5": 80.0}
@@ -242,6 +244,7 @@ def test_clear_matches_the_initial_layout():
     assert cleared["so_names"] == [""] * SO_MAX_CARDS
     assert cleared["so_copiers"] == [[]] * SO_MAX_CARDS
     assert cleared["text_input"] == (getattr(comps["text-input"], "value", "") or "")
+    assert cleared["text_prefix"] == (getattr(comps["text-prefix"], "value", "") or "")
     # 自動保存そのものも消す (次に開いたときに戻ってこない)
     assert cleared["autosave"] is None
 
@@ -362,3 +365,65 @@ def test_clearing_fires_even_when_the_count_is_unchanged():
     assert first != second
     _, value = _sync_card_count(["so-restore-count.data"], "3", second, "4")
     assert value == "6"
+
+
+# ---------------------------------------------------------------------------
+# 蓄積 (チャージ) 型スキル
+# ---------------------------------------------------------------------------
+def _accum_snapshot():
+    """蓄積スキル 1 件を持つスナップショット (カードは _snapshot と同じ 2 枚)。"""
+    fields = {"preset": "wakamo", "name": "ワカモ", "cards": [2, 7], "rate": 100,
+              "cap_mode": "atk", "cap_value": None, "atk": 30000, "atk_pct": 1322,
+              "cap_cards": [], "cap_pct": 100, "burst_mult": 130,
+              "burst_decay": [1]}
+    return _snapshot(
+        accum_values=list(fields.values()),
+        accum_ids=[{"type": "accum", "field": f, "index": 0} for f in fields],
+        accum_next_index=1,
+    )
+
+
+def _find(node, pred):
+    """復元したコンポーネント木から条件に合う最初のノードを返す。"""
+    if pred(node):
+        return node
+    for child in (getattr(node, "children", None) or []
+                  if not isinstance(getattr(node, "children", None), str) else []):
+        hit = _find(child, pred)
+        if hit is not None:
+            return hit
+    return None
+
+
+def test_restores_accum_pool_with_values():
+    state = persist._restored_state(_accum_snapshot())
+    assert state["accum_next_index"] == 1
+    assert len(state["accum"]) == 1
+    card = state["accum"][0]
+    atk = _find(card, lambda n: getattr(n, "id", None)
+                == {"type": "accum", "field": "atk", "index": 0})
+    assert atk is not None and atk.value == 30000
+    mult = _find(card, lambda n: getattr(n, "id", None)
+                 == {"type": "accum", "field": "burst_mult", "index": 0})
+    assert mult.value == 130
+
+
+def test_restored_accum_card_carries_card_options():
+    """選択肢は生成時に渡す (コールバックで後入れすると Dash が無限ループする)。"""
+    state = persist._restored_state(_accum_snapshot())
+    dd = _find(state["accum"][0], lambda n: getattr(n, "id", None)
+               == {"type": "accum", "field": "cards", "index": 0})
+    # 表示順は order = [2, 7] なので「ダメージ1 (ミカ)」「ダメージ2 (ホシノ)」
+    assert [o["value"] for o in dd.options] == [2, 7]
+    assert dd.options[0]["label"] == "ダメージ1 (ミカ)"
+    assert dd.value == [2, 7]
+
+
+def test_clear_all_empties_accum():
+    state = persist._cleared_state()
+    assert state["accum"] == [] and state["accum_next_index"] == 0
+
+
+def test_old_snapshot_without_accum_restores_empty():
+    state = persist._restored_state(_snapshot())
+    assert state["accum"] == [] and state["accum_next_index"] == 0

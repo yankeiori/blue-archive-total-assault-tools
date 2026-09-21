@@ -15,7 +15,9 @@
   ns.persist = {};
 
   // 形式を変えたら app/frontend/persist.py の SNAPSHOT_VERSION も上げること
-  // (版が違う保存は復元側で読み捨てる)。
+  // (版が違う保存は復元側で読み捨てる)。ただし項目の「追加」だけなら版は据え置く
+  // — 古い保存にその項目が無いだけで、復元側は空として正しく扱えるため。
+  // 版を上げると既存ユーザーの保存が全部消えるので、互換な追加では上げない。
   var VERSION = 1;
 
   // main.py に並べた Input / State と 1:1 で対応する引数名。
@@ -39,6 +41,9 @@
     "hp_R0",
     "hp_R1",
     "text_input",
+    "text_prefix",
+    "accum_values",
+    "accum_next_index",
     // --- 足切りライン最適化 ---
     "restart_D",
     "restart_cp",
@@ -67,6 +72,7 @@
     "memo_ids",
     "so_step_ids",
     "so_con_ids",
+    "accum_ids",
     // --- 復元が済むまで保存しないためのフラグ (State) ---
     "armed",
   ];
@@ -81,6 +87,14 @@
       var value = arguments[i];
       snap[FIELDS[i]] = value === undefined ? null : value;
     }
-    return snap;
+    // localStorage を往復しても同じ値になる形へ正規化してから返す。
+    // 配列の中の undefined は JSON では null になるため、そのまま返すと
+    // dcc.Store が「保存した値と手元の値が違う」と判断して設定し直しを
+    // 繰り返し、React の更新上限 (Maximum update depth exceeded) に達する。
+    try {
+      return JSON.parse(JSON.stringify(snap));
+    } catch (e) {
+      return snap;
+    }
   };
 })();

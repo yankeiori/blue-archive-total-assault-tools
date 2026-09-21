@@ -42,6 +42,7 @@ application.clientside_callback(
     Output("result-cdf-graph", "figure"),
     Output("cdf-table-store", "data"),
     Output("conv-damage-input", "value"),
+    Output("accum-summary", "children"),
     Input("run-btn", "n_clicks"),
     State({"type": "param", "param": ALL, "index": ALL}, "value"),
     State({"type": "param", "param": ALL, "index": ALL}, "id"),
@@ -58,6 +59,9 @@ application.clientside_callback(
     State("hp-H1", "value"),
     State("hp-R0", "value"),
     State("hp-R1", "value"),
+    # 蓄積 (チャージ) 型スキルの設定一式 (assets/cos_accumulate.js が使う)
+    State({"type": "accum", "field": ALL, "index": ALL}, "value"),
+    State({"type": "accum", "field": ALL, "index": ALL}, "id"),
     prevent_initial_call=True,
 )
 
@@ -148,13 +152,22 @@ application.clientside_callback(
     function(simVal, restartVal) {
         var ctx = window.dash_clientside.callback_context;
         var nu = window.dash_clientside.no_update;
+        // 双方向同期は Dash のコールバックグラフ上ただ 1 つの循環なので、
+        // 「同値なら何も返さない」で確実に止める必要がある。素の値を === で
+        // 比べるだけだと、片方が '' もう片方が null (数値入力の空欄) のように
+        // 表現が食い違ったまま互いを書き換え続け、React の更新上限
+        // (Maximum update depth exceeded) に達する。値を正規化して比較し、
+        // 書き込む値も正規化後のものにして、1 往復で必ず一致させる。
+        var norm = function (v) {
+            if (v === null || v === undefined || v === '') return null;
+            var n = Number(v);
+            return isNaN(n) ? null : n;
+        };
+        var a = norm(simVal), b = norm(restartVal);
+        if (a === b) return [nu, nu];
         var trig = (ctx.triggered && ctx.triggered.length) ? ctx.triggered[0].prop_id : '';
-        if (trig.indexOf('target-damage') === 0) {
-            return (restartVal === simVal) ? [nu, nu] : [nu, simVal];
-        }
-        if (trig.indexOf('restart-D') === 0) {
-            return (simVal === restartVal) ? [nu, nu] : [restartVal, nu];
-        }
+        if (trig.indexOf('target-damage') === 0) return [nu, a];
+        if (trig.indexOf('restart-D') === 0) return [b, nu];
         return [nu, nu];
     }
     """,
@@ -202,6 +215,9 @@ application.clientside_callback(
     Input("hp-R0", "value"),
     Input("hp-R1", "value"),
     Input("text-input", "value"),
+    Input("text-prefix", "value"),
+    Input({"type": "accum", "field": ALL, "index": ALL}, "value"),
+    Input("accum-next-index", "data"),
     # --- 足切りライン最適化 ---
     Input("restart-D", "value"),
     Input("restart-cp-store", "data"),
@@ -230,6 +246,7 @@ application.clientside_callback(
     State({"type": "memo", "index": ALL}, "id"),
     State({"type": "so-step-skill", "index": ALL}, "id"),
     State({"type": "so-con-type", "index": ALL}, "id"),
+    State({"type": "accum", "field": ALL, "index": ALL}, "id"),
     # --- 復元が済むまで保存しないためのフラグ ---
     State("persist-armed", "data"),
     prevent_initial_call=True,

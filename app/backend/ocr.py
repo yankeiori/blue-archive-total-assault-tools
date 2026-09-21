@@ -327,6 +327,16 @@ def _same_damage(a: dict, b: dict) -> bool:
     return all(a.get(k) == b.get(k) for k in _DAMAGE_KEYS)
 
 
+def _apply_memo_prefix(cards: list[dict], prefix: str) -> list[dict]:
+    """全カードの備考の頭に共通の prefix を付ける (空なら何もしない)。"""
+    prefix = (prefix or "").strip()
+    if not prefix:
+        return cards
+    for card in cards:
+        card["memo"] = f"{prefix} {card['memo']}".strip()
+    return cards
+
+
 # ---------------------------------------------------------------------------
 # テキスト貼り付けからのカード生成
 # ---------------------------------------------------------------------------
@@ -339,8 +349,11 @@ def _same_damage(a: dict, b: dict) -> bool:
 # _merge_consecutive を共用する。
 
 
-def parse_text(text: str) -> dict:
+def parse_text(text: str, prefix: str = "") -> dict:
     """貼り付けテキストからカードパラメータと検出メタ情報を構築する。
+
+    prefix: 全カードの備考の頭に付ける共通の文字列 (例:「ミカ1射目」)。
+            1 回の取り込みがどの攻撃のものか、後から見て分かるようにする。
 
     戻り値: {"cards": [{"params": {...}, "memo": str}, ...],
              "hp_dependent": bool}
@@ -393,6 +406,8 @@ def parse_text(text: str) -> dict:
 
     cards = [_entry_to_card(e) for e in entries if e["first"] is not None]
     cards = _merge_consecutive(cards)
+    # prefix は統合が済んでから付ける (統合後に残る備考にだけ付けば良い)
+    _apply_memo_prefix(cards, prefix)
 
     rows = [{"text": ln} for ln in lines]
     return {"cards": cards, "hp_dependent": _has_hp_dependency(rows)}
@@ -407,6 +422,9 @@ def cards_from_image(image: str | bytes, *, api_key: str | None = None) -> dict:
     return parse_cards(tokens)
 
 
-def cards_from_text(text: str) -> dict:
-    """貼り付けテキスト → {"cards": [...], "hp_dependent": bool}。"""
-    return parse_text(text)
+def cards_from_text(text: str, prefix: str = "") -> dict:
+    """貼り付けテキスト → {"cards": [...], "hp_dependent": bool}。
+
+    prefix を渡すと、生成する全カードの備考の頭に付く。
+    """
+    return parse_text(text, prefix)

@@ -51,7 +51,8 @@ def _run(order, param_values, param_ids):
         _BASE["save_store"],
         _BASE["global_crit"], _BASE["global_evade"], _BASE["damage_mode"],
         _BASE["hp_mode"], _BASE["hp_H"], _BASE["hp_H1"],
-        _BASE["hp_R0"], _BASE["hp_R1"])
+        _BASE["hp_R0"], _BASE["hp_R1"],
+        [], [])          # 蓄積スキルなし
     return cfg
 
 
@@ -61,7 +62,8 @@ def _stale(cfg, order, param_values, param_ids, **over):
         cfg, kw["D"], order, [0, 1], param_values, kw["cp_store"],
         kw["seg_times"], kw["seg_success"], kw["save_store"], kw["global_crit"],
         kw["global_evade"], kw["damage_mode"], kw["hp_mode"],
-        kw["hp_H"], kw["hp_H1"], kw["hp_R0"], kw["hp_R1"], param_ids)
+        kw["hp_H"], kw["hp_H1"], kw["hp_R0"], kw["hp_R1"],
+        [], param_ids, [])          # 蓄積スキルなし
 
 
 def test_fingerprint_is_stable_and_order_sensitive():
