@@ -385,7 +385,8 @@ def _ui_run(saves, D=6_000_000, hp_dep=None):
         ["A", "B", "C", "D"], [{"index": i} for i in range(4)],
         _CPS, {str(k): 1.0 for k in keys}, {str(k): 100.0 for k in keys},
         saves, 60, 0, "post_decay",
-        "on" if hp_dep is not None else "off", *hp)
+        "on" if hp_dep is not None else "off", *hp,
+        [], [])          # 蓄積スキルなし
 
 
 def test_save_toggle_store_round_trip():

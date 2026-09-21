@@ -33,6 +33,48 @@ DEFAULT_SO_LIMIT = 60
 LABEL_STYLE = {"fontSize": "0.85rem", "whiteSpace": "nowrap"}
 
 
+# 蓄積 (チャージ) 型スキルのプリセット。理論・計算は docs/accumulate.md /
+# app/backend/accumulate.py、UI からの値の受け渡しは assets/cos_accumulate.js。
+ACCUM_PRESETS = {
+    "wakamo": {
+        "label": "ワカモ / カンナ型 (与ダメージ100%・上限=攻撃力×1322%)",
+        "name": "ワカモ", "rate": 100, "cap_mode": "atk", "atk_pct": 1322,
+        "cap_pct": 100, "burst_mult": 100, "burst_decay": True,
+        "hint": "着弾から10秒間に味方全員が対象へ与えたダメージが蓄積。爆発倍率には"
+                "属性特効×EXダメージバフ×対象のEXダメージカット×地形適性補正をまとめて入れてください。",
+    },
+    "kei": {
+        "label": "ケイ型 (与ダメージ10%・上限=基本攻撃力×5000%)",
+        "name": "ケイ", "rate": 10, "cap_mode": "atk", "atk_pct": 5000,
+        "cap_pct": 100, "burst_mult": 100, "burst_decay": True,
+        "hint": "増幅装置の範囲内で自身を除く味方が与えたダメージの10%が蓄積。"
+                "爆発は敵防御力などが乗る一方で属性特効は乗らないので、"
+                "その分は爆発倍率に織り込んでください。ケイ自身のカードは蓄積対象から外します。",
+    },
+    "iroha": {
+        "label": "イロハ(水着)型 (与ダメージ150%・上限=付与時ダメージ×120%)",
+        "name": "イロハ(水着)", "rate": 150, "cap_mode": "cards", "atk_pct": 100,
+        "cap_pct": 120, "burst_mult": 100, "burst_decay": False,
+        "hint": "「スーツケース」を付与した攻撃のカードを上限カードに指定してください"
+                "(上限がそのダメージ乱数に連動するため、相関を考慮して計算します)。"
+                "爆発は固定ダメージなので減衰は既定でオフにしています。"
+                "EXの再使用で早期に爆発させる場合は、蓄積スキルを2つ作って対象カードを分けてください。",
+    },
+    "custom": {
+        "label": "カスタム", "name": "", "rate": 100, "cap_mode": "fixed",
+        "atk_pct": 100, "cap_pct": 100, "burst_mult": 100, "burst_decay": True,
+        "hint": "",
+    },
+}
+
+_DEFAULT_ACCUM = {
+    "preset": "wakamo", "name": "", "cards": [], "rate": 100,
+    "cap_mode": "atk", "cap_value": None, "atk": None, "atk_pct": 1322,
+    "cap_cards": [], "cap_pct": 100, "burst_mult": 100, "burst_decay": [1],
+    "burst_after": None,
+}
+
+
 _DEFAULT_PARAMS = {
     "crit_min": 100000,
     "crit_max": 120000,
@@ -178,6 +220,224 @@ def make_damage_card(
     )
 
 
+def _accum_checklist_value(v) -> list:
+    """burst_decay (Checklist の list / bool / None) を Checklist の value へ。"""
+    if v is None:
+        return [1]
+    if isinstance(v, (list, tuple)):
+        return [1] if len(v) > 0 else []
+    return [1] if v else []
+
+
+def accum_options(order: list, memo_by: dict | None = None) -> list:
+    """蓄積スキルのカード選択肢 (表示順の位置でラベル付け、値はカード index)。"""
+    memo_by = memo_by or {}
+    opts = []
+    for pos, i in enumerate(order or []):
+        memo = (memo_by.get(i) or "").strip()
+        opts.append({"label": f"ダメージ{pos + 1}" + (f" ({memo})" if memo else ""),
+                     "value": i})
+    return opts
+
+
+def make_accum_card(index: int, params: dict | None = None,
+                    options: list | None = None) -> html.Div:
+    """蓄積 (チャージ) 型スキル 1 つ分の入力カード。
+
+    options (カード選択肢) は生成時に渡す。コールバックで後から入れると
+    「accum-container.children を Input にして中の options を Output する」形になり、
+    Dash が children の変化とみなして再発火し続ける (無限ループ) ため。
+    """
+    p = dict(_DEFAULT_ACCUM)
+    if params:
+        p.update({k: v for k, v in params.items() if v is not None or k in p})
+
+    def aid(field):
+        return {"type": "accum", "field": field, "index": index}
+
+    def uid(field):
+        """表示専用要素 (value を持たない html.Div) の id。
+
+        入力をまとめて拾う ALL パターン ({"type": "accum", "field": ALL}.value) に
+        value を持たない要素が混ざると、自動保存のスナップショットの配列に
+        undefined が入る。localStorage との往復で undefined は null になるため
+        値が一致しなくなり、dcc.Store が設定し直しを繰り返して
+        「Maximum update depth exceeded」になる。だから type を分ける。
+        """
+        return {"type": "accum-ui", "field": field, "index": index}
+
+    def num(label, field, value, *, width="110px", title=None):
+        return html.Div(
+            [
+                html.Label(label, style=LABEL_STYLE),
+                dcc.Input(id=aid(field), type="number", value=value,
+                          style={"width": "100%"}),
+            ],
+            style={"flex": "1", "minWidth": width}, title=title,
+        )
+
+    cap_mode = p.get("cap_mode") or "atk"
+    show = {"display": "flex", "gap": "8px", "flexWrap": "wrap", "flex": "1"}
+    hide = {"display": "none"}
+    return html.Div(
+        [
+            html.Div(
+                [
+                    html.Strong(f"蓄積スキル {index + 1}"),
+                    dcc.Dropdown(
+                        id=aid("preset"),
+                        options=[{"label": v["label"], "value": k}
+                                 for k, v in ACCUM_PRESETS.items()],
+                        value=p.get("preset") or "wakamo",
+                        clearable=False,
+                        style={"width": "440px", "fontSize": "0.85rem"},
+                    ),
+                    html.Button("適用", id={"type": "accum-preset-btn", "index": index},
+                                n_clicks=0, title="選んだプリセットの既定値を入力欄へ反映します",
+                                style={"fontSize": "0.8rem", "padding": "2px 10px"}),
+                    dcc.Input(id=aid("name"), type="text", placeholder="名前 (任意)",
+                              value=p.get("name") or "",
+                              style={"width": "140px", "fontSize": "0.85rem"}),
+                    html.Button("✕", id={"type": "accum-remove", "index": index},
+                                n_clicks=0,
+                                style={"marginLeft": "auto", "background": "none",
+                                       "border": "none", "cursor": "pointer",
+                                       "fontSize": "1.1rem"}),
+                ],
+                style={"display": "flex", "alignItems": "center", "gap": "8px",
+                       "marginBottom": "6px"},
+            ),
+            html.Div(id=uid("hint"),
+                     children=ACCUM_PRESETS.get(p.get("preset") or "wakamo", {}).get("hint", ""),
+                     style={"fontSize": "0.8rem", "color": "#555", "marginBottom": "6px"}),
+            html.Div(
+                [
+                    html.Div(
+                        [
+                            html.Label("蓄積するカード (与ダメージが溜まるもの)",
+                                       style=LABEL_STYLE),
+                            dcc.Dropdown(id=aid("cards"), options=options or [],
+                                         value=p.get("cards") or [], multi=True,
+                                         placeholder="カードを選択"),
+                        ],
+                        style={"flex": "3", "minWidth": "260px"},
+                    ),
+                    num("蓄積率 (%)", "rate", p.get("rate"),
+                        title="与ダメージの何%が蓄積されるか。100/120/10 など。"),
+                ],
+                style={"display": "flex", "gap": "8px", "flexWrap": "wrap"},
+            ),
+            html.Div(
+                [
+                    html.Div(
+                        [
+                            html.Label("蓄積上限の決まり方", style=LABEL_STYLE),
+                            dcc.Dropdown(
+                                id=aid("cap_mode"),
+                                options=[
+                                    {"label": "攻撃力 × 倍率(%)", "value": "atk"},
+                                    {"label": "固定値を直接入力", "value": "fixed"},
+                                    {"label": "カードのダメージ × 倍率(%)", "value": "cards"},
+                                ],
+                                value=cap_mode, clearable=False,
+                            ),
+                        ],
+                        style={"flex": "1.4", "minWidth": "200px"},
+                    ),
+                    html.Div(
+                        [num("攻撃力", "atk", p.get("atk")),
+                         num("倍率 (%)", "atk_pct", p.get("atk_pct"))],
+                        id=uid("cap_atk_box"),
+                        style=show if cap_mode == "atk" else hide,
+                    ),
+                    html.Div(
+                        [num("上限 (固定値)", "cap_value", p.get("cap_value"))],
+                        id=uid("cap_fixed_box"),
+                        style=show if cap_mode == "fixed" else hide,
+                    ),
+                    html.Div(
+                        [
+                            html.Div(
+                                [
+                                    html.Label("上限を決めるカード", style=LABEL_STYLE),
+                                    dcc.Dropdown(id=aid("cap_cards"), options=options or [],
+                                                 value=p.get("cap_cards") or [],
+                                                 multi=True, placeholder="カードを選択"),
+                                ],
+                                style={"flex": "2", "minWidth": "180px"},
+                            ),
+                            num("倍率 (%)", "cap_pct", p.get("cap_pct")),
+                        ],
+                        id=uid("cap_cards_box"),
+                        style=show if cap_mode == "cards" else hide,
+                    ),
+                ],
+                style={"display": "flex", "gap": "8px", "flexWrap": "wrap",
+                       "marginTop": "6px"},
+            ),
+            html.Div(
+                [
+                    num("爆発ダメージ倍率 (%)", "burst_mult", p.get("burst_mult"),
+                        width="150px",
+                        title="蓄積値に掛かる係数。属性特効・ダメージバフ・"
+                              "ダメージカット・地形補正などをまとめて入れます。"),
+                    html.Div(
+                        [
+                            html.Label("爆発するカード (足切り用)", style=LABEL_STYLE),
+                            dcc.Dropdown(id=aid("burst_after"), options=options or [],
+                                         value=p.get("burst_after"), clearable=True,
+                                         placeholder="蓄積対象の最後 (既定)"),
+                        ],
+                        style={"flex": "2", "minWidth": "220px"},
+                        title="爆発がこのカードの直後に着弾するとみなします。"
+                              "合計ダメージ分布には影響しません(順序を問わないため)。"
+                              "足切りライン最適化で「この関門ではまだ画面に蓄積分が"
+                              "乗っていない」を出すのに使います。",
+                    ),
+                    html.Div(
+                        dcc.Checklist(
+                            id=aid("burst_decay"),
+                            options=[{"label": " 爆発に減衰を適用", "value": 1}],
+                            value=_accum_checklist_value(p.get("burst_decay")),
+                            style={"fontSize": "0.85rem", "whiteSpace": "nowrap"},
+                        ),
+                        title="爆発ダメージも通常の与ダメージと同じ減衰(上限10,966,999)を"
+                              "受けるならチェック。固定ダメージ扱いなら外してください。",
+                        style={"alignSelf": "end", "paddingBottom": "2px"},
+                    ),
+                ],
+                style={"display": "flex", "gap": "12px", "flexWrap": "wrap",
+                       "marginTop": "6px"},
+            ),
+        ],
+        id={"type": "accum-card", "index": index},
+        style={"border": "1px solid #d8c7a0", "borderRadius": "8px",
+               "padding": "10px 12px", "marginBottom": "8px", "background": "#fffdf5"},
+    )
+
+
+def _accum_panel() -> html.Div:
+    """蓄積 (チャージ) 型スキルの設定パネル。"""
+    return html.Details(
+        [
+            html.Summary("⚡ 蓄積スキル (ワカモ/カンナ・ケイ・イロハ(水着) など)",
+                         style={"cursor": "pointer", "fontWeight": "bold"}),
+            html.Div(
+                "与ダメージが溜まって最後にまとめて入るスキルを設定します。"
+                "設定すると合計ダメージ分布に蓄積分の爆発ダメージが加算されます。"
+                "蓄積スキルを複数回撃つ場合は、撃った回数だけ追加して対象カードを分けてください。",
+                style={"fontSize": "0.82rem", "color": "#555", "margin": "6px 0"},
+            ),
+            html.Div(id="accum-container", children=[]),
+            html.Button("+ 蓄積スキル追加", id="accum-add-btn", n_clicks=0,
+                        style={"marginTop": "4px"}),
+        ],
+        id="accum-panel",
+        style={"border": "1px solid #d8c7a0", "borderRadius": "8px",
+               "padding": "10px 12px", "marginBottom": "16px", "background": "#fffbf0"},
+    )
+
+
 def _top_settings_panel() -> html.Div:
     """カード生成の上に配置する「目標ダメージ」「一括設定」パネル。"""
     box_style = {
@@ -305,6 +565,31 @@ def _text_panel() -> html.Div:
     return html.Div(
         [
             html.Strong("📝 テキストからカード生成", style={"fontSize": "0.95rem"}),
+            html.Div(
+                [
+                    html.Label(
+                        "備考の先頭に付ける文字列 (任意)",
+                        htmlFor="text-prefix",
+                        style={"fontSize": "0.8rem", "color": "#555", "display": "block"},
+                    ),
+                    dcc.Input(
+                        id="text-prefix",
+                        type="text",
+                        value="",
+                        placeholder="例: ミカ1射目",
+                        # debounce は付けないこと。自動保存 (localStorage) が
+                        # この値を Input に取り、復元が Output で書き戻すため、
+                        # debounce 付きの dcc.Input だと prop の同期が繰り返され
+                        # "Maximum update depth exceeded" になる。
+                        style={"width": "100%", "boxSizing": "border-box"},
+                    ),
+                    html.Div(
+                        "取り込む全カードの備考の頭に付きます (例: ミカ1射目 ヒット1-10)",
+                        style={"fontSize": "0.75rem", "color": "#888", "marginTop": "2px"},
+                    ),
+                ],
+                style={"marginTop": "8px"},
+            ),
             dcc.Textarea(
                 id="text-input",
                 placeholder=placeholder,
@@ -1155,6 +1440,7 @@ def create_layout() -> html.Div:
                     html.Div(
                         [
                             _top_settings_panel(),
+                            _accum_panel(),
                             html.Div(id="cards-container", children=[]),
                             html.Div(
                                 [
@@ -1175,6 +1461,7 @@ def create_layout() -> html.Div:
                             dcc.Loading(
                                 [
                                     html.Div(id="pass-rate-text", style={"fontSize": "1.2rem", "fontWeight": "bold", "marginBottom": "8px"}),
+                                    html.Div(id="accum-summary", style={"fontSize": "0.9rem", "color": "#555", "marginBottom": "8px", "whiteSpace": "pre-line"}),
                                     dcc.Store(id="cdf-table-store"),
                                     html.Div(
                                         [
@@ -1252,6 +1539,8 @@ def create_layout() -> html.Div:
             dcc.Store(id="card-indices", data=[]),
             dcc.Store(id="sorted-indices", data=[]),
             dcc.Store(id="next-index", data=0),
+            # 蓄積スキル: 次に割り当てる index
+            dcc.Store(id="accum-next-index", data=0),
             # スニップした画像 (data URL) を JS から受け取る
             dcc.Store(id="ocr-image-store", data=None),
             # 多段リスタ: 選択済みチェックポイント (累積ヒット数のリスト)

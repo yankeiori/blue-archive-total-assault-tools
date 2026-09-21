@@ -33,6 +33,59 @@
     return params;
   }
 
+  /**
+   * 蓄積スキルの入力欄 ({type:'accum', field, index}) を
+   * assets/cos_accumulate.js が受け取る pools 配列へ変換する。
+   */
+  function buildPools(values, ids) {
+    if (!ids || !ids.length) return [];
+    var by = {}, order = [];
+    for (var i = 0; i < ids.length; i++) {
+      var idx = ids[i].index;
+      if (!by[idx]) { by[idx] = {}; order.push(idx); }
+      by[idx][ids[i].field] = values[i];
+    }
+    order.sort(function (a, b) { return a - b; });
+    var pools = [];
+    for (var k = 0; k < order.length; k++) {
+      var a = by[order[k]];
+      var mode = a.cap_mode || "atk";
+      var capValue = mode === "atk"
+        ? (parseFloat(a.atk) || 0) * (parseFloat(a.atk_pct) || 0) / 100
+        : (parseFloat(a.cap_value) || 0);
+      pools.push({
+        name: a.name || "蓄積" + (k + 1),
+        cards: a.cards || [],
+        rate: (parseFloat(a.rate) || 0) / 100,
+        capKind: mode === "cards" ? "cards" : "fixed",
+        capValue: capValue,
+        capCards: a.cap_cards || [],
+        capCoef: (parseFloat(a.cap_pct) || 0) / 100,
+        burstMult: (parseFloat(a.burst_mult) || 0) / 100,
+        burstDecay: !!(a.burst_decay && a.burst_decay.length),
+      });
+    }
+    return pools;
+  }
+
+  /**
+   * 蓄積スキルごとの診断行 (飽和確率・爆発平均・溢れ)。
+   * 出力先の #accum-summary は white-space: pre-line なので改行区切りの素の文字列で返す。
+   */
+  function accumSummary(stats) {
+    if (!stats || !stats.length) return "";
+    var lines = stats.map(function (s) {
+      return "⚡ " + (s.name || "蓄積") + ": 蓄積上限 " + fmt(Math.round(s.capMean)) +
+        " / 窓内ダメージ平均 " + fmt(Math.round(s.damageMean)) +
+        " / 飽和確率 " + (s.satProb * 100).toFixed(1) + "%" +
+        " / 爆発ダメージ平均 " + fmt(Math.round(s.burstMean)) +
+        " / 期待溢れ " + fmt(Math.round(s.overflowMean));
+    });
+    lines.push("※ 飽和確率が高いほど上限で頭打ちです。溢れが大きいときは蓄積スキルを" +
+               "撃つ回数を増やすか、窓ごとの与ダメージを均すと損が減ります。");
+    return lines.join("\n");
+  }
+
   function extractHitParams(
     indices,
     params,
@@ -351,7 +404,9 @@
     hpH,
     hpH1,
     hpR0,
-    hpR1
+    hpR1,
+    accumValues,
+    accumIds
   ) {
     if (!nClicks) throw window.dash_clientside.PreventUpdate;
 
@@ -362,10 +417,12 @@
     });
     if (!indices.length) {
       var nu = window.dash_clientside.no_update;
-      return [nu, "⚠ カードがありません。「+ ダメージ追加」でカードを追加してください。", nu, nu, nu];
+      return [nu, "⚠ カードがありません。「+ ダメージ追加」でカードを追加してください。", nu, nu, nu, ""];
     }
 
     var params = buildParams(values, ids);
+    var pools = buildPools(accumValues, accumIds);
+    var useAccum = ns.accum.hasPools(pools);
     var target = parseFloat(targetDamage || 0);
     var hp = { H: hpH, H1: hpH1, R0: hpR0, R1: hpR1 };
     var anyNormal = hpMode === "on" && indices.some(function (i) {
@@ -374,18 +431,31 @@
     var title = hpMode === "on"
       ? (anyNormal ? "累積ダメージ分布 (HP依存+通常混在)" : "累積ダメージ分布 (HP依存)")
       : "合計ダメージ分布";
+    if (useAccum) {
+      var nu2 = window.dash_clientside.no_update;
+      if (hpMode === "on") {
+        return [nu2, "⚠ 蓄積スキルと HP依存ダメージの併用は未対応です。" +
+                "サイドバーの「HP依存ダメージ」を「なし」にしてください。",
+                nu2, nu2, nu2, ""];
+      }
+      title = "合計ダメージ分布 (蓄積スキルあり)";
+    }
 
     // -------- COS 法 (準厳密) --------
     if (method !== "mc") {
-      var dist = ns.cos.distribution(
-        {
-          indices: indices, params: params, globalCrit: globalCrit,
-          globalEvade: globalEvade, damageMode: damageMode,
-          hpMode: hpMode, hp: hp, globalStability: globalStab,
-        },
-        600
-      );
+      var cosOpts = {
+        indices: indices, params: params, globalCrit: globalCrit,
+        globalEvade: globalEvade, damageMode: damageMode,
+        hpMode: hpMode, hp: hp, globalStability: globalStab, pools: pools,
+      };
+      var dist = useAccum
+        ? ns.accum.distribution(cosOpts, 600)
+        : ns.cos.distribution(cosOpts, 600);
       if (!dist) throw window.dash_clientside.PreventUpdate;
+      if (dist.error) {
+        var nu3 = window.dash_clientside.no_update;
+        return [nu3, "⚠ " + dist.error, nu3, nu3, nu3, ""];
+      }
       var xRangeCos = massRange(dist.x, dist.pdf, 0.001, 0.999);
       var mk = markerShapes(dist.mean, target, xRangeCos);
       var passText = "";
@@ -412,13 +482,31 @@
       var cdfFigCos = cdfFigure(dist.x, dist.cdf, dist.mean, target,
                                 "それ以上になる確率 P(D≥x) — COS 法", xLabelCos, xRangeCos);
       var tblCos = { grid: Array.prototype.slice.call(dist.x), cdf: Array.prototype.slice.call(dist.cdf) };
-      return [figureCos, passText, cdfFigCos, tblCos, target > 0 ? target : null];
+      return [figureCos, passText, cdfFigCos, tblCos, target > 0 ? target : null,
+              accumSummary(dist.windowStats)];
     }
 
     // -------- モンテカルロ --------
-    var hitParams = extractHitParams(indices, params, globalCrit, globalEvade, damageMode, globalStab);
-    var totalDamage =
-      hpMode === "on" ? simulateMixed(hitParams, hp, N_SAMPLES) : simulate(hitParams, N_SAMPLES);
+    var totalDamage;
+    if (useAccum) {
+      totalDamage = ns.accum.sample(
+        {
+          indices: indices, params: params, globalCrit: globalCrit,
+          globalEvade: globalEvade, damageMode: damageMode,
+          globalStability: globalStab, pools: pools,
+        },
+        N_SAMPLES
+      );
+      if (!totalDamage || totalDamage.error) {
+        var nu4 = window.dash_clientside.no_update;
+        return [nu4, "⚠ " + ((totalDamage && totalDamage.error) || "計算できません"),
+                nu4, nu4, nu4, ""];
+      }
+    } else {
+      var hitParams = extractHitParams(indices, params, globalCrit, globalEvade, damageMode, globalStab);
+      totalDamage =
+        hpMode === "on" ? simulateMixed(hitParams, hp, N_SAMPLES) : simulate(hitParams, N_SAMPLES);
+    }
 
     var hist = computeHistogram(totalDamage, 200);
     var xRangeMc = massRange(hist.x, hist.y, 0.001, 0.999);
@@ -458,7 +546,7 @@
     var cdfFigMc = cdfFigure(cdfXs, cdfYs, hist.mean, target,
                              "それ以上になる確率 P(D≥x) — モンテカルロ", xLabelMc, xRangeMc);
     var tblMc = { grid: cdfXs, cdf: cdfYs };
-    return [figure, passTextMc, cdfFigMc, tblMc, target > 0 ? target : null];
+    return [figure, passTextMc, cdfFigMc, tblMc, target > 0 ? target : null, ""];
   };
 
   // =========================================================================

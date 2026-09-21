@@ -41,6 +41,8 @@ from app.frontend.layout import (
     DEFAULT_TARGET_DAMAGE,
     SO_DEFAULT_CARDS,
     SO_MAX_CARDS,
+    accum_options,
+    make_accum_card,
     make_damage_card,
     make_so_constraint,
     make_so_step,
@@ -104,6 +106,25 @@ def _restore_cards(snap):
         for i in order
     ]
     return children, order
+
+
+def _restore_accum(snap, options):
+    """蓄積 (チャージ) 型スキルの入力カードを組み直す。
+
+    戻り値は (children, 次の index)。古い保存 (蓄積スキル導入前) には
+    accum_values / accum_ids が無く、空リストとして正しく復元される。
+    カード選択肢は生成時に渡す (コールバックで後入れすると Dash が無限ループする)。
+    """
+    by_index: dict = {}
+    for v, aid in zip(_list(snap, "accum_values"), _list(snap, "accum_ids")):
+        if isinstance(aid, dict) and "index" in aid and "field" in aid:
+            by_index.setdefault(aid["index"], {})[aid["field"]] = v
+    order = sorted(by_index)
+    children = [make_accum_card(i, params=by_index[i], options=options)
+                for i in order]
+    next_idx = max(_int(snap.get("accum_next_index"), 0),
+                   (max(order) + 1) if order else 0)
+    return children, next_idx
 
 
 def _so_names(snap):
@@ -199,7 +220,8 @@ def _cleared_state():
         "hp_mode": DEFAULT_HP_MODE,
         "hp_H": DEFAULT_HP_H, "hp_H1": DEFAULT_HP_H1,
         "hp_R0": DEFAULT_HP_R0, "hp_R1": DEFAULT_HP_R1,
-        "text_input": "",
+        "text_input": "", "text_prefix": "",
+        "accum": [], "accum_next_index": 0,
         "restart_D": DEFAULT_TARGET_DAMAGE,
         "restart_cp": [], "restart_seg_time": {"0": 1.0},
         "restart_seg_success": {"0": 100.0}, "restart_save": [],
@@ -223,6 +245,9 @@ def _restored_state(snap):
     names, copier_values, disp, copiers = _so_names(snap)
     steps, step_order, next_step = _restore_so_steps(snap, disp, copiers)
     cons, next_con = _restore_so_constraints(snap)
+    accum, accum_next = _restore_accum(
+        snap, accum_options(order, _indexed(_list(snap, "memo_values"),
+                                            _list(snap, "memo_ids"))))
     return {
         "cards": cards, "card_indices": order, "sorted_indices": order,
         # 新しいカードの index は、復元した中の最大値より必ず後ろに取る
@@ -238,6 +263,8 @@ def _restored_state(snap):
         "hp_H": snap.get("hp_H"), "hp_H1": snap.get("hp_H1"),
         "hp_R0": snap.get("hp_R0"), "hp_R1": snap.get("hp_R1"),
         "text_input": snap.get("text_input") or "",
+        "text_prefix": snap.get("text_prefix") or "",
+        "accum": accum, "accum_next_index": accum_next,
         "restart_D": snap.get("restart_D"),
         "restart_cp": _list(snap, "restart_cp"),
         "restart_seg_time": snap.get("restart_seg_time") or {"0": 1.0},
@@ -286,6 +313,9 @@ _OUTPUTS = dict(
     hp_R0=Output("hp-R0", "value", allow_duplicate=True),
     hp_R1=Output("hp-R1", "value", allow_duplicate=True),
     text_input=Output("text-input", "value", allow_duplicate=True),
+    text_prefix=Output("text-prefix", "value", allow_duplicate=True),
+    accum=Output("accum-container", "children", allow_duplicate=True),
+    accum_next_index=Output("accum-next-index", "data", allow_duplicate=True),
     restart_D=Output("restart-D", "value", allow_duplicate=True),
     restart_cp=Output("restart-cp-store", "data", allow_duplicate=True),
     restart_seg_time=Output("restart-seg-time-store", "data",

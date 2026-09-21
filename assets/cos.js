@@ -188,6 +188,7 @@
       var enemies = parseInt(p.enemies || 1);
       if (!(enemies >= 1)) enemies = 1;
       groups.push({
+        idx: indices[ii],          // 元のカード index (蓄積スキルの対象指定で使う)
         mix: cardToMixture(p, globalCrit, globalEvade, damageMode, globalStab),
         count: hits * enemies,
         hpDep: hpDepFlag(p),
@@ -1002,6 +1003,8 @@
     return buildSumDist(groups, true);
   };
   ns.cos.hpDepFlag = hpDepFlag;
+  // cos_accumulate.js (蓄積スキル) がカード→混合の展開を共用する。
+  ns.cos.buildGroups = buildGroups;
 
   /** 分布を細グリッド上の {x, pdf, cdf} に評価する (図用)。 */
   ns.cos.distribution = function (opts, nGrid) {

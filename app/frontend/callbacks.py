@@ -9,13 +9,18 @@ from dash.exceptions import PreventUpdate
 
 from app import OCR_ENABLED
 from app.backend import (
-    ocr, restart_cos, restart_mixed, restart_save, skill_order, tl_parse,
+    ocr, restart_accum, restart_cos, restart_mixed, restart_save, skill_order,
+    tl_parse,
 )
+from app.backend.accumulate import AccumWindow, CapSpec
 from app.backend.cos import HPParams, build_hit_mixtures, y_mixture
 from app.backend.mixed import card_is_hp_dep, hit_specs_from_cards, mixed_support
 from app.frontend.layout import (
+    ACCUM_PRESETS,
     SO_DEFAULT_CARDS,
     SO_MAX_CARDS,
+    accum_options,
+    make_accum_card,
     make_damage_card,
     make_so_constraint,
     make_so_step,
@@ -31,7 +36,22 @@ SO_SEARCH_CAP_MIN = 500
 # エクスポート/インポートで扱うカードパラメータ項目とフォーマット版。
 _CARD_PARAMS = ["crit_min", "crit_max", "normal_min", "normal_max",
                 "hits", "crit_rate", "evade_rate", "enemies", "hp_dep"]
-_IO_VERSION = 2
+_IO_VERSION = 3
+
+# 蓄積 (チャージ) 型スキルのエクスポート項目。カード参照 (cards / cap_cards) は
+# 表示順の位置で書き出す — インポートはカードを 0..n-1 で作り直すため。
+_ACCUM_FIELDS = ["preset", "name", "cards", "rate", "cap_mode", "cap_value",
+                 "atk", "atk_pct", "cap_cards", "cap_pct", "burst_mult",
+                 "burst_decay", "burst_after"]
+
+
+def _accum_by_index(values, ids) -> dict:
+    """蓄積スキルの (値, id) 列を {index: {field: 値}} にする。"""
+    by: dict = {}
+    for v, aid in zip(values or [], ids or []):
+        if isinstance(aid, dict) and "index" in aid and "field" in aid:
+            by.setdefault(aid["index"], {})[aid["field"]] = v
+    return by
 
 
 # ---------------------------------------------------------------------------
@@ -211,20 +231,24 @@ if OCR_ENABLED:
     Output("hp-mode", "value", allow_duplicate=True),
     Input("text-import-btn", "n_clicks"),
     State("text-input", "value"),
+    State("text-prefix", "value"),
     State("cards-container", "children"),
     State("card-indices", "data"),
     State("next-index", "data"),
     prevent_initial_call=True,
 )
-def text_add_cards(n_clicks, text, children, indices, next_idx):
-    """貼り付けテキストを解析し、抽出カードを追加する。"""
+def text_add_cards(n_clicks, text, prefix, children, indices, next_idx):
+    """貼り付けテキストを解析し、抽出カードを追加する。
+
+    prefix は取り込む全カードの備考の頭に付く (例:「ミカ1射目 ヒット1-10」)。
+    """
     if not n_clicks or not (text or "").strip():
         raise PreventUpdate
 
     no_change = (dash.no_update, dash.no_update, dash.no_update, dash.no_update)
 
     try:
-        result = ocr.cards_from_text(text)
+        result = ocr.cards_from_text(text, prefix)
     except Exception as exc:  # noqa: BLE001 - 予期せぬ失敗もユーザーに表示
         return (*no_change, f"⚠ 解析に失敗しました: {exc}", dash.no_update)
 
@@ -267,10 +291,72 @@ def _assemble_cards_ordered(order, card_indices, param_values, param_ids):
     return [(i, by_index[i]) for i in seq if i in by_index]
 
 
+def _card_hit_spans(ordered) -> dict:
+    """カード index → そのカードが占める Hit 番号のリスト。
+
+    Hit の数え方は build_hit_mixtures と同じ (カードの「Hit数」。足切りページは
+    従来から「敵の数」を掛けない)。
+    """
+    spans, pos = {}, 0
+    for idx, params in ordered:
+        h = max(int(params.get("hits") or 1), 0)
+        spans[idx] = list(range(pos, pos + h))
+        pos += h
+    return spans
+
+
+def _accum_windows(accum_values, accum_ids, ordered) -> list:
+    """蓄積スキルの入力欄から AccumWindow のリストを作る (Hit 番号は通し番号)。
+
+    クライアント側 assets/simulation.js の buildPools と同じ変換。
+    """
+    spans = _card_hit_spans(ordered)
+    wins = []
+    for k, a in sorted(_accum_by_index(accum_values, accum_ids).items()):
+        cards = [c for c in (a.get("cards") or []) if c in spans]
+        try:
+            rate = float(a.get("rate") or 0) / 100.0
+            mult = float(a.get("burst_mult") or 0) / 100.0
+        except (TypeError, ValueError):
+            continue
+        hits = [h for c in cards for h in spans[c]]
+        if not hits or rate <= 0 or mult <= 0:
+            continue
+        name = (a.get("name") or "").strip() or f"蓄積スキル{k + 1}"
+        mode = a.get("cap_mode") or "atk"
+        if mode == "cards":
+            src = [h for c in (a.get("cap_cards") or []) if c in spans
+                   for h in spans[c]]
+            if not src:
+                raise ValueError(f"「{name}」の上限カードが指定されていません。")
+            cap = CapSpec(kind="hits", hits=src,
+                          coef=float(a.get("cap_pct") or 0) / 100.0)
+        elif mode == "atk":
+            cap = CapSpec(kind="fixed",
+                          value=float(a.get("atk") or 0)
+                          * float(a.get("atk_pct") or 0) / 100.0)
+        else:
+            cap = CapSpec(kind="fixed", value=float(a.get("cap_value") or 0))
+        hits = sorted(hits)
+        after = a.get("burst_after")
+        burst_hit = spans[after][-1] if (after in spans and spans[after]) else hits[-1]
+        if burst_hit < max([*hits, *cap.source_hits()]):
+            raise ValueError(
+                f"「{name}」の爆発カードが蓄積の終わりより前です。"
+                "爆発は蓄積が止まったあとに起きるので、蓄積対象の最後のカード以降を"
+                "指定してください。")
+        wins.append(AccumWindow(hits=hits, rate=rate, cap=cap,
+                                burst_mult=mult,
+                                burst_decay=bool(a.get("burst_decay")),
+                                name=name, burst_hit=burst_hit))
+    return wins
+
+
 def _restart_fingerprint(order, card_indices, param_values, param_ids, cp_store,
                          seg_times, seg_success, save_store, D,
                          global_crit, global_evade,
-                         damage_mode, hp_mode, hp_H, hp_H1, hp_R0, hp_R1) -> str:
+                         damage_mode, hp_mode, hp_H, hp_H1, hp_R0, hp_R1,
+                         accum_values=None, accum_ids=None) -> str:
     """足切り最適化の結果を左右する入力だけを 1 本の指紋にまとめる。
 
     run_restart は実行ボタンでしか発火しないため、実行後にカードを並べ替えたり
@@ -293,11 +379,42 @@ def _restart_fingerprint(order, card_indices, param_values, param_ids, cp_store,
         "damage_mode": damage_mode,
         "hp_mode": hp_mode,
         "hp": [hp_H, hp_H1, hp_R0, hp_R1] if hp_mode == "on" else None,
+        # 蓄積スキルも結果を変えるので指紋に含める
+        "accum": sorted(_accum_by_index(accum_values, accum_ids).items()),
     }
     blob = json.dumps(payload, sort_keys=True, default=str)
     return hashlib.md5(blob.encode("utf-8")).hexdigest()
 
 
+def _export_accum(values, ids, pos_of: dict) -> list:
+    """蓄積スキルの設定を JSON 用に書き出す (カード参照を表示順の位置へ)。"""
+    out = []
+    for index in sorted(_accum_by_index(values, ids)):
+        a = _accum_by_index(values, ids)[index]
+        row = {k: a.get(k) for k in _ACCUM_FIELDS}
+        for key in ("cards", "cap_cards"):
+            row[key] = [pos_of[i] for i in (a.get(key) or []) if i in pos_of]
+        b = a.get("burst_after")
+        row["burst_after"] = pos_of.get(b) if b is not None else None
+        row["burst_decay"] = bool(a.get("burst_decay"))
+        out.append(row)
+    return out
+
+
+def _import_accum(rows, options) -> tuple[list, int]:
+    """JSON の蓄積スキル設定から入力カードを組み直す (位置 = 新しいカード index)。"""
+    children = []
+    for row in (rows or []):
+        if not isinstance(row, dict):
+            continue
+        params = {k: row.get(k) for k in _ACCUM_FIELDS}
+        params["burst_decay"] = [1] if row.get("burst_decay") else []
+        children.append(make_accum_card(len(children), params=params,
+                                        options=options))
+    return children, len(children)
+
+
+# ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
 # 入力情報のエクスポート (カード + 全体設定 + 多段リスタ設定 → JSON ダウンロード)
 # ---------------------------------------------------------------------------
@@ -324,13 +441,16 @@ def _restart_fingerprint(order, card_indices, param_values, param_ids, cp_store,
     State("hp-H", "value"), State("hp-H1", "value"),
     State("hp-R0", "value"), State("hp-R1", "value"),
     State("restart-D", "value"),
+    State({"type": "accum", "field": ALL, "index": ALL}, "value"),
+    State({"type": "accum", "field": ALL, "index": ALL}, "id"),
     prevent_initial_call=True,
 )
 def export_input(n_clicks, order, card_indices, param_values, param_ids,
                  memo_values, memo_ids, cp_store, seg_times, seg_success,
                  save_store, target_damage, gcrit, gevade, gstab, calc_method,
                  damage_mode,
-                 hp_mode, hp_H, hp_H1, hp_R0, hp_R1, restart_D):
+                 hp_mode, hp_H, hp_H1, hp_R0, hp_R1, restart_D,
+                 accum_values, accum_ids):
     if not n_clicks:
         raise PreventUpdate
 
@@ -361,6 +481,8 @@ def export_input(n_clicks, order, card_indices, param_values, param_ids,
             "restart_D": restart_D,
         },
         "cards": cards,
+        "accum": _export_accum(accum_values, accum_ids,
+                               {idx: pos for pos, (idx, _p) in enumerate(ordered)}),
         "restart": {"checkpoints": cps, "segment_times": segment_times,
                     "segment_success": segment_success,
                     "save_points": sorted({int(x) for x in (save_store or [])
@@ -393,6 +515,8 @@ def export_input(n_clicks, order, card_indices, param_values, param_ids,
     Output("hp-H", "value"), Output("hp-H1", "value"),
     Output("hp-R0", "value"), Output("hp-R1", "value"),
     Output("restart-D", "value"),
+    Output("accum-container", "children", allow_duplicate=True),
+    Output("accum-next-index", "data", allow_duplicate=True),
     Input("import-upload", "contents"),
     prevent_initial_call=True,
 )
@@ -411,7 +535,7 @@ def import_input(contents):
             raise ValueError("カードが空です。")
     except Exception as exc:  # noqa: BLE001 - 不正ファイルはユーザーに表示
         return (nu, nu, nu, nu, nu, nu, nu, nu, f"⚠ インポート失敗: {exc}",
-                *globals_nu)
+                *globals_nu, nu, nu)
 
     children = []
     total_hits = 0
@@ -438,12 +562,19 @@ def import_input(contents):
     g = data.get("globals", {}) or {}
     def gv(key):
         return g[key] if key in g else nu
+    accum_children, accum_next = _import_accum(
+        data.get("accum"),
+        accum_options(indices, {i: (c.get("memo") or "")
+                                for i, c in enumerate(cards)}))
     msg = f"✅ {n} 枚のカードと設定を読み込みました。足切りライン最適化の設定も復元済みです。"
+    if accum_children:
+        msg += f" 蓄積スキル {len(accum_children)} 件も復元しました。"
     return (
         children, indices, n, indices, cps, seg_times, seg_success, saves, msg,
         gv("target_damage"), gv("global_crit"), gv("global_evade"), gv("global_stability"),
         gv("calc_method"), gv("damage_mode"), gv("hp_mode"),
         gv("hp_H"), gv("hp_H1"), gv("hp_R0"), gv("hp_R1"), gv("restart_D"),
+        accum_children, accum_next,
     )
 
 
@@ -829,12 +960,15 @@ def _cutoff_figure(disp, title, *, color="#d63031", ref_disp=None):
     State("hp-H1", "value"),
     State("hp-R0", "value"),
     State("hp-R1", "value"),
+    State({"type": "accum", "field": ALL, "index": ALL}, "value"),
+    State({"type": "accum", "field": ALL, "index": ALL}, "id"),
     prevent_initial_call=True,
 )
 def run_restart(n_clicks, D, order, card_indices, param_values, param_ids,
                 memo_values, memo_ids, cp_store, seg_times, seg_success_store,
                 save_store, global_crit, global_evade,
-                damage_mode, hp_mode, hp_H, hp_H1, hp_R0, hp_R1):
+                damage_mode, hp_mode, hp_H, hp_H1, hp_R0, hp_R1,
+                accum_values, accum_ids):
     if not n_clicks:
         raise PreventUpdate
 
@@ -902,8 +1036,30 @@ def run_restart(n_clicks, D, order, card_indices, param_values, param_ids,
     if D <= 0:
         return err("目標ダメージ D を正の値で入力してください。")
 
+    try:
+        accum_wins = _accum_windows(accum_values, accum_ids, ordered)
+    except ValueError as exc:
+        return err(str(exc))
+
     dep_flags = [card_is_hp_dep(c) for c in cards]
-    if hp_mode == "on" and any(dep_flags):
+    if accum_wins:
+        # 蓄積スキルあり (docs/accumulate.md §4)。チェックポイントが蓄積窓の境界に
+        # あれば増分は状態非依存のままなので、区間の増分分布を差し替えるだけで
+        # 既存の Dinkelbach + 後ろ向き帰納がそのまま使える。
+        if hp_mode == "on" and any(dep_flags):
+            return err("蓄積スキルと HP依存ダメージ(ミカ型)の併用は未対応です。"
+                       "サイドバーの「HP依存ダメージ」を「なし」にしてください。")
+        if saves:
+            return err("蓄積スキルと凸区切り(セーブポイント)の併用は未対応です。"
+                       "凸の区切りを外してから実行してください。")
+        try:
+            res = restart_accum.analyze_accum(hits, accum_wins, cps, hit_times, D,
+                                              seg_success=seg_success)
+        except ValueError as exc:
+            return err(str(exc))
+        model_note = "和モデル + 蓄積スキル"
+        model_key = "accum"
+    elif hp_mode == "on" and any(dep_flags):
         try:
             hp = HPParams(H=float(hp_H), H1=float(hp_H1),
                           R0=float(hp_R0), R1=float(hp_R1))
@@ -1007,7 +1163,9 @@ def run_restart(n_clicks, D, order, card_indices, param_values, param_ids,
             order, card_indices, param_values, param_ids, cp_store,
             seg_times_raw, seg_success_raw, save_raw, D_raw,
             global_crit, global_evade,
-            damage_mode, hp_mode, hp_H, hp_H1, hp_R0, hp_R1),
+            damage_mode, hp_mode, hp_H, hp_H1, hp_R0, hp_R1,
+            accum_values, accum_ids),
+        "accum": restart_accum.windows_to_json(accum_wins),
         "cards": cards, "crit": float(global_crit or 0),
         "evade": float(global_evade or 0), "damage_mode": damage_mode or "post_decay",
         "cps": cps, "saves": saves, "hit_times": hit_times,
@@ -1117,8 +1275,70 @@ def run_restart(n_clicks, D, order, card_indices, param_values, param_ids,
             "設定から外しても結果は変わりません。",
             style={"color": "#b35900", "fontSize": "0.85rem", "marginTop": "8px"},
         ))
+    children += _accum_notes(res)
+    children += _accum_pending_notes(res, cum_to_label, D)
     summary = html.Div(children)
     return fig, summary, config, sliders
+
+
+def _accum_notes(res, detail: bool = True) -> list:
+    """蓄積スキルごとの診断行 (飽和確率・爆発平均・溢れ)。"""
+    stats = res.get("accum_stats") or []
+    if not stats:
+        return []
+    out = [html.Div(
+        "⚡ 蓄積スキルを含めて計算しています。足切りラインは「実ダメージ + 確定した"
+        "蓄積分」で判定してください(画面に出る値と同じです)。",
+        style={"color": "#8a6d00", "fontSize": "0.85rem", "marginTop": "8px"})]
+    if not detail:
+        return out
+    for st in stats:
+        out.append(html.Div(
+            f"⚡ {st['name']}: 蓄積上限 {st['cap_mean']:,.0f} / "
+            f"窓内ダメージ平均 {st['damage_mean']:,.0f} / "
+            f"飽和確率 {st['sat_prob'] * 100:.1f}% / "
+            f"爆発ダメージ平均 {st['burst_mean']:,.0f} / "
+            f"期待溢れ {st['overflow_mean']:,.0f}",
+            style={"color": "#555", "fontSize": "0.85rem"}))
+    return out
+
+
+def _accum_pending_notes(res, cum_to_label, D) -> list:
+    """爆発がまだ着弾していない関門について、画面基準の読み替えを出す。
+
+    足切りラインは「実ダメージ + 確定した蓄積分」(実効ダメージ) で出ているため、
+    爆発より手前の関門では画面の数字にその分が乗っていない。最適方策は変わらない
+    (確定プールは確保済みの情報として使える) が、読むときに足し戻す必要がある。
+    """
+    stats = res.get("accum_stats") or []
+    if not stats or not cum_to_label:
+        return []
+    lines = []
+    for row in res["rows"]:
+        m = int(row["checkpoint"])
+        # 爆発は burst_hit の直後 → 先頭 m Hit に含まれるのは burst_hit < m のとき
+        late = [st for st in stats if int(st.get("burst_hit", -1)) >= m]
+        if not late:
+            continue
+        mean = sum(st["burst_mean"] for st in late)
+        lo = sum(st.get("burst_lo") or 0.0 for st in late)
+        hi = sum(st.get("burst_hi") or 0.0 for st in late)
+        label = cum_to_label.get(str(m), f"{m} Hit")
+        rem = float(D) - float(row["gate"])
+        rng = f" ({lo:,.0f}〜{hi:,.0f})" if hi - lo >= 1 else ""
+        lines.append(html.Div(
+            f"・{label}: {'・'.join(st['name'] for st in late)} の爆発 "
+            f"{mean:,.0f}{rng} が未着弾 → 画面の「残りダメージ」では "
+            f"{rem + mean:,.0f} 前後以下なら続行",
+            style={"color": "#555", "fontSize": "0.85rem"}))
+    if not lines:
+        return []
+    return [html.Div(
+        "⚡ 次の関門は爆発より手前なので、画面にはまだ蓄積分が乗っていません。"
+        "表の「残りダメージ」に爆発ぶんを足して読んでください"
+        "(チェックポイントを爆発の後に置けば、そのまま読めます)。",
+        style={"color": "#8a6d00", "fontSize": "0.85rem", "marginTop": "8px"}),
+        *lines]
 
 
 def _blocks_table(res, cps, cum_to_label):
@@ -1211,20 +1431,23 @@ _STALE_STYLE = {
     Input("hp-H1", "value"),
     Input("hp-R0", "value"),
     Input("hp-R1", "value"),
+    Input({"type": "accum", "field": ALL, "index": ALL}, "value"),
     State({"type": "param", "param": ALL, "index": ALL}, "id"),
+    State({"type": "accum", "field": ALL, "index": ALL}, "id"),
 )
 def flag_restart_stale(cfg, D, order, card_indices, param_values, cp_store,
                        seg_times, seg_success, save_store,
                        global_crit, global_evade,
                        damage_mode, hp_mode, hp_H, hp_H1, hp_R0, hp_R1,
-                       param_ids):
+                       accum_values, param_ids, accum_ids):
     """実行後に入力が変わっていたら「再実行してください」を出す。"""
     if not cfg or not cfg.get("fingerprint"):
         return "", ""          # まだ一度も実行していない
     now = _restart_fingerprint(order, card_indices, param_values, param_ids,
                                cp_store, seg_times, seg_success, save_store, D,
                                global_crit, global_evade, damage_mode,
-                               hp_mode, hp_H, hp_H1, hp_R0, hp_R1)
+                               hp_mode, hp_H, hp_H1, hp_R0, hp_R1,
+                               accum_values, accum_ids)
     if now == cfg["fingerprint"]:
         return "", ""
     return (
@@ -1318,6 +1541,14 @@ def update_restart_interactive(slider_values, slider_ids, cfg):
         res = restart_mixed.analyze_mixed(specs, hp, cps, cfg["hit_times"], D,
                                           manual_gates=manual_gates,
                                           seg_success=seg_success)
+    elif cfg["model"] == "accum":
+        try:
+            res = restart_accum.analyze_accum(
+                hits, restart_accum.windows_from_json(cfg.get("accum")),
+                cps, cfg["hit_times"], D, manual_gates=manual_gates,
+                seg_success=seg_success)
+        except ValueError as exc:
+            return go.Figure(), html.Div(f"⚠ {exc}", style={"color": "#d63031"})
     else:
         res = restart_cos.analyze(hits, cps, cfg["hit_times"], D,
                                   manual_gates=manual_gates,
@@ -1363,6 +1594,7 @@ def update_restart_interactive(slider_values, slider_ids, cfg):
             f"{cfg['opt_speedup']:.2f}x)",
             style={"color": "#555", "fontSize": "0.88rem"},
         ),
+        *_accum_notes(res, detail=False),
     ])
     return fig, summary
 
@@ -2002,3 +2234,131 @@ def so_run(_n, step_order,
             f"... 他 {len(results) - limit} 件(表示件数上限)",
             style={"color": "#888", "fontSize": "0.85rem"}))
     return html.Div(header + rows)
+
+
+# ===========================================================================
+# 蓄積 (チャージ) 型スキル
+#   モデルと計算は docs/accumulate.md / app/backend/accumulate.py、
+#   実際の分布計算はクライアント側 assets/cos_accumulate.js が行う。
+#   ここは入力欄の増減・選択肢の更新・プリセット適用だけを担当する。
+# ===========================================================================
+def _accum_options_now(order, indices, memo_values, memo_ids) -> list:
+    """現在のカード一覧 (表示順) から蓄積スキルの選択肢を作る。"""
+    order = [i for i in (order or []) if isinstance(i, int)]
+    for i in (indices or []):
+        if i not in order:
+            order.append(i)
+    memo_by = {m["index"]: v for v, m in zip(memo_values or [], memo_ids or [])
+               if isinstance(m, dict)}
+    return accum_options(order, memo_by)
+
+
+@callback(
+    Output("accum-container", "children"),
+    Output("accum-next-index", "data"),
+    Input("accum-add-btn", "n_clicks"),
+    Input({"type": "accum-remove", "index": ALL}, "n_clicks"),
+    State("accum-container", "children"),
+    State("accum-next-index", "data"),
+    State("sorted-indices", "data"),
+    State("card-indices", "data"),
+    State({"type": "memo", "index": ALL}, "value"),
+    State({"type": "memo", "index": ALL}, "id"),
+    prevent_initial_call=True,
+)
+def update_accum_cards(_add, _remove, children, next_idx, order, card_indices,
+                       memo_values, memo_ids):
+    trigger = ctx.triggered_id
+    children = children or []
+    next_idx = next_idx or 0
+
+    if trigger == "accum-add-btn":
+        options = _accum_options_now(order, card_indices, memo_values, memo_ids)
+        children.append(make_accum_card(next_idx, options=options))
+        return children, next_idx + 1
+
+    if isinstance(trigger, dict) and trigger.get("type") == "accum-remove":
+        # カード追加でボタンが増えると再発火するので、押された当人のときだけ処理する。
+        if not _triggered_clicked():
+            raise PreventUpdate
+        rm = trigger["index"]
+        children = [
+            c for c in children
+            if not (c["props"]["id"].get("type") == "accum-card"
+                    and c["props"]["id"].get("index") == rm)
+        ]
+        return children, next_idx
+
+    raise PreventUpdate
+
+
+@callback(
+    Output({"type": "accum", "field": "cards", "index": ALL}, "options"),
+    Output({"type": "accum", "field": "cap_cards", "index": ALL}, "options"),
+    Output({"type": "accum", "field": "burst_after", "index": ALL}, "options"),
+    Input("sorted-indices", "data"),
+    Input("card-indices", "data"),
+    Input({"type": "memo", "index": ALL}, "value"),
+    State({"type": "memo", "index": ALL}, "id"),
+    State({"type": "accum", "field": "cards", "index": ALL}, "id"),
+)
+def accum_card_options(order, indices, memo_values, memo_ids, accum_ids):
+    """カード一覧が変わったとき、蓄積スキルの選択肢を作り直す。
+
+    accum-container.children は **Input にしない**。中の options を書き換えると
+    Dash が children の変化とみなして再発火し、無限ループになる。
+    蓄積スキルを新しく作るときの選択肢は make_accum_card(options=...) で渡す。
+    """
+    options = _accum_options_now(order, indices, memo_values, memo_ids)
+    n = len(accum_ids or [])
+    return [options] * n, [options] * n, [options] * n
+
+
+@callback(
+    Output({"type": "accum-ui", "field": "hint", "index": MATCH}, "children"),
+    Input({"type": "accum", "field": "preset", "index": MATCH}, "value"),
+)
+def accum_hint(preset):
+    return ACCUM_PRESETS.get(preset or "custom", {}).get("hint", "")
+
+
+@callback(
+    Output({"type": "accum-ui", "field": "cap_atk_box", "index": MATCH}, "style"),
+    Output({"type": "accum-ui", "field": "cap_fixed_box", "index": MATCH}, "style"),
+    Output({"type": "accum-ui", "field": "cap_cards_box", "index": MATCH}, "style"),
+    Input({"type": "accum", "field": "cap_mode", "index": MATCH}, "value"),
+)
+def accum_cap_mode_visibility(mode):
+    show = {"display": "flex", "gap": "8px", "flexWrap": "wrap", "flex": "1"}
+    hide = {"display": "none"}
+    return (show if mode == "atk" else hide,
+            show if mode == "fixed" else hide,
+            show if mode == "cards" else hide)
+
+
+@callback(
+    Output({"type": "accum", "field": "name", "index": MATCH}, "value"),
+    Output({"type": "accum", "field": "rate", "index": MATCH}, "value"),
+    Output({"type": "accum", "field": "cap_mode", "index": MATCH}, "value"),
+    Output({"type": "accum", "field": "atk_pct", "index": MATCH}, "value"),
+    Output({"type": "accum", "field": "cap_pct", "index": MATCH}, "value"),
+    Output({"type": "accum", "field": "burst_mult", "index": MATCH}, "value"),
+    Output({"type": "accum", "field": "burst_decay", "index": MATCH}, "value"),
+    Input({"type": "accum-preset-btn", "index": MATCH}, "n_clicks"),
+    State({"type": "accum", "field": "preset", "index": MATCH}, "value"),
+    State({"type": "accum", "field": "name", "index": MATCH}, "value"),
+    prevent_initial_call=True,
+)
+def accum_apply_preset(n_clicks, preset, name):
+    """プリセットの既定値を入力欄へ流し込む。
+
+    自動保存からの復元でカードを作り直したときに上書きされないよう、
+    ドロップダウンの変更ではなく明示的な「適用」ボタンでのみ発火させる。
+    """
+    if not n_clicks:
+        raise PreventUpdate
+    pr = ACCUM_PRESETS.get(preset or "custom")
+    if not pr:
+        raise PreventUpdate
+    return ((name or pr["name"]), pr["rate"], pr["cap_mode"], pr["atk_pct"],
+            pr["cap_pct"], pr["burst_mult"], [1] if pr["burst_decay"] else [])

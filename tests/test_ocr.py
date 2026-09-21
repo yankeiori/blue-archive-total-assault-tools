@@ -107,3 +107,55 @@ def test_row_grouping_tolerates_y_jitter():
     assert len(cards) == 1
     p = cards[0]["params"]
     assert (p["crit_min"], p["crit_max"]) == (1000, 2000)
+
+
+# ---------------------------------------------------------------------------
+# テキスト貼り付け (ocr.parse_text)
+# ---------------------------------------------------------------------------
+_PASTED = """\
+ヒット1-2 (165.33%)
+18,164 - 25,247
+会心
+35,239 - 48,979
+ヒット3-10 (82.66%)
+9,082 - 12,623
+会心
+17,619 - 24,489
+"""
+
+
+def test_text_memo_keeps_the_hit_label():
+    """prefix なしでは従来どおりヒットラベル(+攻撃力%)だけ。"""
+    cards = ocr.parse_text(_PASTED)["cards"]
+    assert [c["memo"] for c in cards] == [
+        "ヒット1-2 攻撃力165.33%",
+        "ヒット3-10 攻撃力82.66%",
+    ]
+
+
+def test_text_prefix_is_prepended_to_every_memo():
+    """prefix は取り込んだ全カードの備考の頭に付く。"""
+    cards = ocr.parse_text(_PASTED, "ミカ1射目")["cards"]
+    assert [c["memo"] for c in cards] == [
+        "ミカ1射目 ヒット1-2 攻撃力165.33%",
+        "ミカ1射目 ヒット3-10 攻撃力82.66%",
+    ]
+    # ダメージ値は prefix の有無で変わらない
+    assert cards[0]["params"]["crit_min"] == 35239
+
+
+def test_text_prefix_is_trimmed_and_optional():
+    """空白だけの prefix は付けない。前後の空白は落とす。"""
+    assert ocr.parse_text(_PASTED, "   ")["cards"][0]["memo"] == "ヒット1-2 攻撃力165.33%"
+    assert ocr.parse_text(_PASTED, None)["cards"][0]["memo"] == "ヒット1-2 攻撃力165.33%"
+    assert ocr.parse_text(_PASTED, "  ミカ1射目 ")["cards"][0]["memo"].startswith(
+        "ミカ1射目 ヒット1-2")
+
+
+def test_text_prefix_survives_merging_consecutive_hits():
+    """同値の連続ヒットを1枚に統合した後も prefix は1回だけ付く。"""
+    text = "\n".join(f"ヒット{i} (10.00%)\n1,000 - 2,000" for i in range(1, 4))
+    cards = ocr.cards_from_text(text, "ミカ2射目")["cards"]
+    assert len(cards) == 1
+    assert cards[0]["params"]["hits"] == 3
+    assert cards[0]["memo"] == "ミカ2射目 ヒット1 攻撃力10.00% 確定会心"
