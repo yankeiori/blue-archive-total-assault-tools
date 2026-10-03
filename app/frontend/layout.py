@@ -29,6 +29,7 @@ DEFAULT_HP_R1 = 2
 DEFAULT_HP_R0 = 1
 DEFAULT_SO_HAND_SIZE = "3"
 DEFAULT_SO_LIMIT = 60
+DEFAULT_SO_HELPER = "none"
 
 LABEL_STYLE = {"fontSize": "0.85rem", "whiteSpace": "nowrap"}
 
@@ -1021,6 +1022,13 @@ def so_target_options(names: list, copiers: set,
     ]
 
 
+def so_helper_options(names: list, n_cards: int = SO_DEFAULT_CARDS) -> list:
+    """評価軸「助っ人」ドロップダウンの選択肢。"none" = 評価軸を使わない。"""
+    return ([{"label": "なし", "value": "none"}]
+            + [{"label": (names[i] or "").strip() or f"カード{i + 1}",
+                "value": str(i)} for i in range(n_cards)])
+
+
 def make_so_step(index: int, skill_options: list, target_options: list, *,
                  skill=None, target=None, slot: str = "any",
                  draw: bool = False, memo: str = "",
@@ -1290,6 +1298,34 @@ def _skill_order_page() -> html.Div:
                 ],
                 style={"border": "1px solid #ddd", "borderRadius": "8px",
                        "padding": "12px", "marginBottom": "14px", "background": "#f5fff7"},
+            ),
+            # --- 評価軸 ---
+            html.Div(
+                [
+                    html.Strong("評価軸(任意)"),
+                    html.Div(
+                        "助っ人のカードを選ぶと、助っ人を開始デッキのなるべく後ろに"
+                        "置ける初期配置から順に表示します。",
+                        style={"fontSize": "0.8rem", "color": "#888", "margin": "4px 0 8px"},
+                    ),
+                    html.Div(
+                        [
+                            html.Label("助っ人", style=LABEL_STYLE),
+                            dcc.Dropdown(
+                                id="so-helper",
+                                options=so_helper_options(_SO_DEFAULT_NAMES,
+                                                          SO_DEFAULT_CARDS),
+                                value=DEFAULT_SO_HELPER,
+                                clearable=False,
+                                searchable=False,
+                                style={"width": "180px", "marginLeft": "8px"},
+                            ),
+                        ],
+                        style={"display": "flex", "alignItems": "center"},
+                    ),
+                ],
+                style={"border": "1px solid #ddd", "borderRadius": "8px",
+                       "padding": "12px", "marginBottom": "14px", "background": "#fbf5ff"},
             ),
             # --- 実行 ---
             html.Div(

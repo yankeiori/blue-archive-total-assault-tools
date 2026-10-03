@@ -15,6 +15,7 @@ from app.backend.skill_order import (
     different_slots,
     distinct_layouts,
     solve,
+    solve_helper_back,
     total_layouts,
     trace_entry_label,
 )
@@ -384,3 +385,73 @@ def test_matches_reference_random():
                     tgt = rng.choice(cand)
                 plan.append(Step(sk, copy_target=tgt, slot=slot, draw=draw))
         assert _actual(n, copiers, plan) == _expected(n, copiers, plan), plan
+
+
+# ---------------------------------------------------------------------------
+# 位置固定 (fixed) と助っ人を後ろに置く評価軸
+# ---------------------------------------------------------------------------
+_HELPER_CASES = [
+    (6, 3, set(), [Step(0), Step(1), Step(2), Step(3), Step(0, slot=1)], 3),
+    (6, 3, set(), [Step(0), Step(1), Step(2), Step(3), Step(0, slot=1)], 5),
+    (6, 3, {0}, [Step(0, copy_target=1), Step(1, use_copy=True), Step(2)], 0),
+    (6, 3, set(), [Step(None), Step(None), Step(3)], 3),
+    (6, 3, set(), [Step(1), Step(1, retreat=True), Step(None), Step(2)], 1),
+    (7, 5, set(), [Step(0), Step(1), Step(6), Step(0, draw=True)], 6),
+]
+
+
+@pytest.mark.parametrize("n,hand_size,copiers,plan,helper", _HELPER_CASES)
+def test_fixed_matches_filtered_reference(n, hand_size, copiers, plan, helper):
+    """位置を固定した探索 = 固定しない解のうちその位置に助っ人がいるもの。"""
+    expected = _expected(n, copiers, plan, hand_size)
+    for pos in range(n):
+        res, _ = solve(n, copiers, plan, hand_size=hand_size,
+                       fixed={pos: helper})
+        got = Counter()
+        for sol in res:
+            seq = tuple(e[0] for e in sol.trace)
+            expanded = sol.expand()
+            assert len(expanded) == sol.count
+            for lay in expanded:
+                got[(lay, seq)] += 1
+        want = Counter({k: v for k, v in expected.items()
+                        if k[0][pos] == helper})
+        assert got == want, pos
+
+
+@pytest.mark.parametrize("n,hand_size,copiers,plan,helper", _HELPER_CASES)
+def test_helper_back_orders_by_position(n, hand_size, copiers, plan, helper):
+    res, truncated = solve_helper_back(n, copiers, plan, helper=helper,
+                                       hand_size=hand_size)
+    assert not truncated
+    positions = [sol.layout.index(helper) for sol in res]
+    assert positions == sorted(positions, reverse=True)
+    best = max(lay.index(helper) for lay, _ in _ref_solve(
+        n, copiers, plan, hand_size))
+    assert positions[0] == best
+    # 位置で分けて集めても、解の全体は固定しない探索と同じ
+    plain, _ = solve(n, copiers, plan, hand_size=hand_size)
+    assert distinct_layouts(res) == distinct_layouts(plain)
+
+
+def test_helper_back_truncation_keeps_the_best_first():
+    """打ち切っても先頭は最も後ろに置ける解になる。"""
+    plan = [Step(None)] * 3
+    res, truncated = solve_helper_back(6, set(), plan, helper=2,
+                                       max_results=5)
+    assert truncated and len(res) == 5
+    assert all(sol.layout.index(2) == 5 for sol in res)
+
+
+def test_helper_back_stats_when_no_solution():
+    plan = [Step(0), Step(0)]          # ドロー無しの連打は成立しない
+    stats = {}
+    res, _ = solve_helper_back(6, set(), plan, helper=1, stats=stats)
+    assert res == [] and stats["max_depth"] == 1
+
+
+def test_fixed_rejects_invalid():
+    with pytest.raises(ValueError):
+        solve(6, set(), [Step(0)], fixed={6: 0})
+    with pytest.raises(ValueError):
+        solve(6, set(), [Step(0)], fixed={0: 1, 1: 1})
