@@ -241,6 +241,7 @@ application.clientside_callback(
     Input({"type": "so-con-type", "index": ALL}, "value"),
     Input({"type": "so-con-steps", "index": ALL}, "value"),
     Input("so-next-con", "data"),
+    Input("so-helper", "value"),
     # --- 値と添字を対応づけるための id 群 ---
     State({"type": "param", "param": ALL, "index": ALL}, "id"),
     State({"type": "memo", "index": ALL}, "id"),

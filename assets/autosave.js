@@ -67,6 +67,7 @@
     "so_con_type",
     "so_con_steps",
     "so_next_con",
+    "so_helper",
     // --- 値と添字を対応づけるための id 群 (State) ---
     "param_ids",
     "memo_ids",

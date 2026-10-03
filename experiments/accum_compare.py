@@ -8,7 +8,7 @@
     - モンテカルロ (mc_accum)           … 正解基準
     - 生存関数積分 (min_moments_survival) … MC 非依存の E[min] 検証 (docs §6)
 
-さらに docs/accumulate.md §3.2 の「窓への配分は均すほど溢れが小さい」を数値で確認する。
+さらに docs/accumulate.md §5.2 の「窓への配分は均すほど溢れが小さい」を数値で確認する。
 
 実行例:
     uv run python -m experiments.accum_compare
@@ -125,7 +125,7 @@ def main() -> None:
     _compare("5. 蓄積率 120% / 上限 30,000,000 / 爆発に減衰あり", hm, [w5],
              burst_decay=True, quad_win=w5)
 
-    # --- 6. 配分の最適性 (docs/accumulate.md §3.2) ---------------------------
+    # --- 6. 配分の最適性 (docs/accumulate.md §5.2) ---------------------------
     print("\n=== 6. 同じ攻撃列を何回の窓に割るか (配分損失) ===")
     cap = CapSpec(kind="fixed", value=2_500_000)
     splits = {

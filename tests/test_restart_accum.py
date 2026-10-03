@@ -3,10 +3,10 @@
 正解基準は 3 つ。
   (1) 窓なしなら既存の COS 版 (restart_cos.analyze) に一致する
   (2) 飽和しない上限なら「窓内カードを (1+α) 倍した和モデル」に一致する
-      (docs/accumulate.md §7 の縮退)
+      (docs/accumulate.md §8 の縮退)
   (3) 関門を適用した前向き指標 (通過率・成功率・期待時間) が素朴な MC に一致する
 さらに、窓が足切り境界をまたぐ設定は ValueError で弾かれることを確認する
-(docs/accumulate.md §4.2: 1 次元 DP では解けないため)。
+(docs/accumulate.md §6.2: 1 次元 DP では解けないため)。
 """
 import numpy as np
 import pytest

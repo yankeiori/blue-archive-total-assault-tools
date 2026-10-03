@@ -25,6 +25,7 @@ from app.frontend.layout import (
     make_so_constraint,
     make_so_step,
     so_card_count_options,
+    so_helper_options,
     so_skill_options,
     so_slot_options,
     so_target_options,
@@ -1043,7 +1044,7 @@ def run_restart(n_clicks, D, order, card_indices, param_values, param_ids,
 
     dep_flags = [card_is_hp_dep(c) for c in cards]
     if accum_wins:
-        # 蓄積スキルあり (docs/accumulate.md §4)。チェックポイントが蓄積窓の境界に
+        # 蓄積スキルあり (docs/accumulate.md §6)。チェックポイントが蓄積窓の境界に
         # あれば増分は状態非依存のままなので、区間の増分分布を差し替えるだけで
         # 既存の Dinkelbach + 後ろ向き帰納がそのまま使える。
         if hp_mode == "on" and any(dep_flags):
@@ -1627,6 +1628,17 @@ def _so_int(value, default):
         return default
 
 
+def _so_position_label(pos, hand_size, n_cards):
+    """開始デッキ上の位置 (1始まり) の表示名。"""
+    if pos <= hand_size:
+        where = "手札"
+    elif pos == n_cards:
+        where = "山札の一番下"
+    else:
+        where = "山札"
+    return f"{pos}番目({where})"
+
+
 def _so_step_order_from(children):
     """手順コンテナ children の並び順から step index のリストを返す。"""
     order = []
@@ -1894,6 +1906,7 @@ def so_toggle_target(skill_value, copier_values, copier_ids, count_raw):
 @callback(
     Output({"type": "so-step-skill", "index": ALL}, "options"),
     Output({"type": "so-step-target", "index": ALL}, "options"),
+    Output("so-helper", "options"),
     Input({"type": "so-name", "index": ALL}, "value"),
     Input({"type": "so-copier", "index": ALL}, "value"),
     Input("so-card-count", "value"),
@@ -1908,8 +1921,11 @@ def so_refresh_options(name_values, copier_values, count_raw,
     _, disp_names, copiers = _so_names_copiers(
         name_values, name_ids, copier_values, copier_ids, n_cards)
     n = len(skill_dd_ids)
+    # 助っ人の選択値はここで戻さない。復元直後は枚数より先に名前が変わって
+    # 発火するので、範囲外に見えても消さずに so_run 側で無視する。
     return ([so_skill_options(disp_names, copiers, n_cards)] * n,
-            [so_target_options(disp_names, copiers, n_cards)] * n)
+            [so_target_options(disp_names, copiers, n_cards)] * n,
+            so_helper_options(disp_names, n_cards))
 
 
 # ---------------------------------------------------------------------------
@@ -1975,6 +1991,7 @@ def so_update_constraints(_add, _rm, children, next_idx):
     State("so-limit", "value"),
     State("so-card-count", "value"),
     State("so-hand-size", "value"),
+    State("so-helper", "value"),
     prevent_initial_call=True,
 )
 def so_run(_n, step_order,
@@ -1983,7 +2000,7 @@ def so_run(_n, step_order,
            slot_values, slot_ids, draw_values, draw_ids,
            memo_values, memo_ids,
            con_types, con_type_ids, con_steps, con_step_ids,
-           limit, count_raw, hand_size_raw):
+           limit, count_raw, hand_size_raw, helper_raw):
     n_cards = _so_int(count_raw, SO_DEFAULT_CARDS)
     hand_size = _so_int(hand_size_raw, skill_order.HAND_SIZE_NORMAL)
     _, disp_names, copiers = _so_names_copiers(
@@ -2100,11 +2117,20 @@ def so_run(_n, step_order,
     # 全件そろえるのに時間がかかる一方、表示に使われるのは先頭 limit 件だけ。
     # (下限 500 は「実際に絞り込めている手順なら正確な件数が出る」ようにするため)
     search_cap = max(limit, SO_SEARCH_CAP_MIN)
+    # 評価軸: 助っ人をなるべく後ろに置ける解から並べる
+    helper = _so_int(helper_raw, None)
+    if helper is not None and not (0 <= helper < n_cards):
+        helper = None
     stats = {}
     try:
-        results, truncated = skill_order.solve(
-            n_cards, copiers, plan, constraints,
-            hand_size=hand_size, max_results=search_cap, stats=stats)
+        if helper is None:
+            results, truncated = skill_order.solve(
+                n_cards, copiers, plan, constraints,
+                hand_size=hand_size, max_results=search_cap, stats=stats)
+        else:
+            results, truncated = skill_order.solve_helper_back(
+                n_cards, copiers, plan, constraints, helper,
+                hand_size=hand_size, max_results=search_cap, stats=stats)
     except skill_order.SearchBudgetExceeded:
         return _so_error(
             "探索の組合せが多すぎて打ち切りました。「指定なし」ステップを減らすか、"
@@ -2134,6 +2160,13 @@ def so_run(_n, step_order,
             style={"marginBottom": "10px"},
         ),
     ]
+    if helper is not None and results:
+        best = results[0].layout.index(helper) + 1
+        header.append(html.Div(
+            [html.Strong("評価軸: "),
+             f"助っ人「{disp_names[helper]}」を開始デッキの後ろに置ける順。"
+             f"最も後ろは {_so_position_label(best, hand_size, n_cards)}"],
+            style={"fontSize": "0.85rem", "marginBottom": "8px"}))
     if not results:
         header.append(html.Div(
             "条件を満たす初期配置は見つかりませんでした。",
@@ -2206,6 +2239,15 @@ def so_run(_n, step_order,
                 (html.Strong(disp_names[i]) if i is not None
                  else html.Span("任意", style={"color": "#999"})),
             ], style={"marginRight": "12px", "whiteSpace": "nowrap"}))
+        if helper is not None:
+            # 最後の1枚はタップ順に出ないので、助っ人の位置は別に示す
+            order_parts.append(html.Span(
+                "助っ人 " + _so_position_label(sol.layout.index(helper) + 1,
+                                              hand_size, n_cards),
+                style={"background": "#e8d8f5", "color": "#5b2c83",
+                       "borderRadius": "4px", "padding": "0 6px",
+                       "fontSize": "0.8rem", "marginRight": "8px",
+                       "whiteSpace": "nowrap"}))
         if sol.count > 1:
             order_parts.append(html.Span(
                 f"({sol.count}通り)",

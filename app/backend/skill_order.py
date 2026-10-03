@@ -419,7 +419,7 @@ def default_node_budget(plan):
 
 def solve(n_skills, copiers, plan, constraints=(), *,
           hand_size=HAND_SIZE_NORMAL, max_results=None,
-          node_budget=None, stats=None):
+          node_budget=None, stats=None, fixed=None):
     """条件を満たす初期配置を列挙する。
 
     n_skills   : カード枚数(通常戦6 / 制約解除決戦10)。
@@ -436,6 +436,8 @@ def solve(n_skills, copiers, plan, constraints=(), *,
                  打ち切られないようにする)。
     stats      : dict を渡すと "max_depth"(探索が到達できた最大の手順数)を
                  書き込む。解が0件のとき、どの手順で成立しなくなるかが分かる。
+    fixed      : {位置: スキル添字} を渡すと、その位置のカードを最初から
+                 確定させた状態で探索する(助っ人の位置固定などに使う)。
 
     戻り値: (results, truncated)
     results   = [Solution, ...]  (layout, trace) としても展開できる
@@ -455,18 +457,63 @@ def solve(n_skills, copiers, plan, constraints=(), *,
     ctx.truncated = False
     ctx.max_depth = 0
 
-    hand = [("P", p) for p in range(min(n_skills, hand_size))]
+    fixed = dict(fixed or {})
+    if (len(set(fixed.values())) != len(fixed)
+            or not all(0 <= p < n_skills and 0 <= s < n_skills
+                       for p, s in fixed.items())):
+        raise ValueError(f"fixed が不正です: {fixed}")
+
+    def card_at(p):
+        return ("N", fixed[p]) if p in fixed else ("P", p)
+
+    hand = [card_at(p) for p in range(min(n_skills, hand_size))]
     hand += [None] * max(0, hand_size - n_skills)
-    deck = [("P", p) for p in range(hand_size, n_skills)]
+    deck = [card_at(p) for p in range(hand_size, n_skills)]
 
     try:
-        _dfs(hand, deck, 0, {}, frozenset(), frozenset(), [], ctx)
+        _dfs(hand, deck, 0, fixed, frozenset(fixed.values()), frozenset(),
+             [], ctx)
     except _StopSearch:
         ctx.truncated = True
     finally:
         if stats is not None:
             stats["max_depth"] = ctx.max_depth
     return ctx.results, ctx.truncated
+
+
+def solve_helper_back(n_skills, copiers, plan, constraints=(), helper=0, *,
+                      hand_size=HAND_SIZE_NORMAL, max_results=None,
+                      node_budget=None, stats=None):
+    """助っ人(スキル helper)を開始デッキのなるべく後ろに置ける解から順に返す。
+
+    助っ人を最後の位置に固定して solve() し、次に1つ前の位置…と前へ
+    ずらしながら解を集める。位置ごとに固定するので、max_results で
+    打ち切っても先頭に並ぶのは「最も後ろに置ける」解であることが保証される
+    (1回だけ探索して並べ替えると、打ち切られた分に最良の解が残りうる)。
+
+    各解の layout では助っ人の位置が確定しているので、
+    sol.layout.index(helper) がその解の位置(0始まり)になる。
+    引数と戻り値は solve() と同じ。node_budget は位置ごとに適用する。
+    stats["max_depth"] は全位置での最大値。
+    """
+    results = []
+    truncated = False
+    depth = 0
+    for pos in range(n_skills - 1, -1, -1):
+        left = None if max_results is None else max_results - len(results)
+        st = {}
+        res, trunc = solve(n_skills, copiers, plan, constraints,
+                           hand_size=hand_size, max_results=left,
+                           node_budget=node_budget, stats=st,
+                           fixed={pos: helper})
+        depth = max(depth, st.get("max_depth", 0))
+        results.extend(res)
+        if trunc:
+            truncated = True
+            break
+    if stats is not None:
+        stats["max_depth"] = depth
+    return results, truncated
 
 
 def total_layouts(results):

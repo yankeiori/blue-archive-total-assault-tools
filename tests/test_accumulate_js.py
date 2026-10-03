@@ -88,8 +88,12 @@ def test_js_matches_python_card_cap_outside():
     d, _ = _py(wins, [0.0])
     xs = _xs(d)
     js = _js(pools, xs)
-    assert js["mean"] == pytest.approx(d.mean, rel=1e-5)
-    assert np.abs(np.array(js["cdf"]) - d.cdf(xs)).max() < 5e-5
+    # 上限ノードのバケット規則 (_cap_bucket_bounds) は JS でも同じなので厳密に一致する
+    assert js["mean"] == pytest.approx(d.mean, rel=1e-9)
+    assert np.abs(np.array(js["cdf"]) - d.cdf(xs)).max() < 1e-9
+    st_js, st_py = js["windowStats"][0], d.window_stats[0]
+    assert st_js["satProb"] == pytest.approx(st_py.sat_prob, abs=1e-9)
+    assert st_js["capMean"] == pytest.approx(st_py.cap_mean, rel=1e-9)
 
 
 def test_js_matches_python_multi_pool():

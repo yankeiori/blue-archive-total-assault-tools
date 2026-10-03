@@ -5,7 +5,7 @@
  *
  *     A_k = g_k(mult_k * min(C_k, α_k Σ_{i∈W_k} X_i)),   T = Σ_i X_i + Σ_k A_k
  *
- * 蓄積窓 W_k は互いに素と仮定する (docs/accumulate.md §3.1)。このとき窓の寄与
+ * 蓄積窓 W_k は互いに素と仮定する (docs/accumulate.md §1.3)。このとき窓の寄与
  * Z_k = S_k + A_k と窓外合計 V は相互独立なので、各成分を 1 次元で作って畳み込む。
  *
  * 全体を「原点 0・刻み h の等間隔セル質量」で統一し、
@@ -155,31 +155,59 @@
     return out;
   }
 
-  /** セル質量を等質量バケットへまとめ、{v: 代表値, w: 質量} を返す。 */
+  /**
+   * 上限分布のセル質量を等質量バケットへまとめ、{v: 代表値 (条件付き平均), w: 質量} を返す。
+   * app/backend/accumulate.py の _cap_buckets / _cap_bucket_bounds と同じ規則:
+   * 等質量で切ったうえで、1 バケットの幅を (台の幅 / nNodes) までに抑え、
+   * それより広い空白 (会心/非会心の間など) は必ず境界にする。空白を跨ぐと
+   * 代表値が取りえない値に落ち、そのバケットだけで O(1/N) の誤差になる。
+   */
   function quantize(cells, step, nNodes) {
-    var idx = [], i;
-    for (i = 0; i < cells.length; i++) if (cells[i] > TRIM_EPS) idx.push(i);
-    if (idx.length <= nNodes) {
-      return { v: idx.map(function (k) { return k * step; }),
-               w: idx.map(function (k) { return cells[k]; }) };
-    }
-    var total = 0;
-    for (i = 0; i < idx.length; i++) total += cells[idx[i]];
-    var v = [], w = [], acc = 0, sum = 0, mom = 0, bucket = 1;
-    for (i = 0; i < idx.length; i++) {
-      var m = cells[idx[i]];
-      acc += m; sum += m; mom += m * idx[i] * step;
-      if (acc >= (total * bucket) / nNodes && bucket < nNodes) {
-        if (sum > 0) { v.push(mom / sum); w.push(sum); }
-        sum = 0; mom = 0; bucket++;
+    var idx = [], m = [], i;
+    for (i = 0; i < cells.length; i++) if (cells[i] > TRIM_EPS) { idx.push(i); m.push(cells[i]); }
+    var size = idx.length;
+    var bounds = [];
+    if (size <= nNodes) {
+      for (i = 0; i <= size; i++) bounds.push(i);
+    } else {
+      // 等質量の境界 (numpy の searchsorted(cum, total*k/n) + 1 と同じ)
+      var cum = new Float64Array(size), run = 0;
+      for (i = 0; i < size; i++) { run += m[i]; cum[i] = run; }
+      var cuts = {};
+      cuts[0] = true; cuts[size] = true;
+      var j = 0;
+      for (var k = 1; k < nNodes; k++) {
+        var target = (run * k) / nNodes;
+        while (j < size && cum[j] < target) j++;
+        cuts[Math.min(Math.max(j + 1, 1), size - 1)] = true;
+      }
+      var maxSpan = Math.max(1, Math.ceil((idx[size - 1] - idx[0]) / nNodes));
+      for (i = 1; i < size; i++) if (idx[i] - idx[i - 1] > maxSpan) cuts[i] = true;
+      var base = Object.keys(cuts).map(Number).sort(function (x, y) { return x - y; });
+      bounds.push(0);
+      for (i = 1; i < base.length; i++) {
+        var a = base[i - 1], b = base[i], start = idx[a];
+        // 幅の上限を超えるバケットはセル番号で等幅に割る
+        while (idx[b - 1] - start > maxSpan) {
+          var kk = a;
+          while (kk < b && idx[kk] <= start + maxSpan) kk++;
+          bounds.push(kk);
+          a = kk; start = idx[kk];
+        }
+        bounds.push(b);
       }
     }
-    if (sum > 0) { v.push(mom / sum); w.push(sum); }
+    var v = [], w = [];
+    for (i = 1; i < bounds.length; i++) {
+      var sum = 0, mom = 0;
+      for (var t = bounds[i - 1]; t < bounds[i]; t++) { sum += m[t]; mom += m[t] * idx[t]; }
+      if (sum > 0) { v.push((mom * step) / sum); w.push(sum); }
+    }
     return { v: v, w: w };
   }
 
   // =========================================================================
-  // 区分線形写像 ψ (docs/accumulate.md §1.1)
+  // 区分線形写像 ψ (docs/accumulate.md §2)
   // =========================================================================
   function burstAmount(s, cap, rate, burstDecay, mult) {
     var p = mult * Math.min(cap, rate * s);

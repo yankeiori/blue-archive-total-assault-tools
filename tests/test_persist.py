@@ -69,6 +69,7 @@ def _snapshot(**over):
         "so_con_type": ["same"], "so_con_steps": ["1,2"],
         "so_con_ids": [{"type": "so-con-type", "index": 0}],
         "so_next_con": 1,
+        "so_helper": "2",
     }
     snap.update(over)
     return snap
@@ -176,6 +177,14 @@ def test_restore_rebuilds_skill_order_rows():
     assert vals["so-con-type"] == "same"
     assert vals["so-con-steps"] == "1,2"
     assert state["so_next_con"] == 1
+    assert state["so_helper"] == "2"
+
+
+def test_restore_helper_defaults_for_old_snapshots():
+    """評価軸の導入前の保存には so_helper が無い → 「なし」で復元。"""
+    snap = _snapshot()
+    del snap["so_helper"]
+    assert persist._restored_state(snap)["so_helper"] == "none"
 
 
 def _step_values(row):
@@ -233,6 +242,7 @@ def test_clear_matches_the_initial_layout():
         "so-step-order": "so_step_order",
         "so-next-step": "so_next_step",
         "so-next-con": "so_next_con",
+        "so-helper": "so_helper",
         "card-indices": "card_indices",
         "next-index": "next_index",
         "sorted-indices": "sorted_indices",
