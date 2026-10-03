@@ -4,7 +4,7 @@
 
     A_k = g_k(mult_k * min(C_k, α_k Σ_{i∈W_k} X_i)),   T = Σ_i X_i + Σ_k A_k
 
-を計算する。W_k (蓄積窓) は互いに素と仮定する (docs/accumulate.md §3.1 の主定理)。
+を計算する。W_k (蓄積窓) は互いに素と仮定する (docs/accumulate.md §1.3 の分解定理)。
 このとき窓の寄与 Z_k = S_k + A_k と窓外合計 V は相互独立なので、各成分の分布を
 1 次元で作ってから畳み込めばよい。
 
@@ -100,7 +100,7 @@ class AccumWindow:
 
 @dataclass
 class WindowStats:
-    """窓ごとの診断量 (docs/accumulate.md §3.2)。"""
+    """窓ごとの診断量 (docs/accumulate.md §4.7)。"""
     name: str
     hits: list[int]
     rate: float
@@ -115,7 +115,7 @@ class WindowStats:
 
 
 # =============================================================================
-# 区分線形写像 ψ (docs/accumulate.md §1.1)
+# 区分線形写像 ψ (docs/accumulate.md §2)
 # =============================================================================
 
 def pool_amount(s, cap: float, rate: float) -> np.ndarray:
@@ -200,6 +200,46 @@ def _cell_quantile(cells: np.ndarray, step: float, p: float) -> float:
     return float(min(i, cells.size - 1) * step)
 
 
+def _bucket_bounds(m: np.ndarray, n_nodes: int) -> list[int]:
+    """質量列 m (正の要素のみ) を等質量の連続区間に切る境界 [0, ..., m.size]。"""
+    if m.size <= n_nodes:
+        return list(range(m.size + 1))
+    cum = np.cumsum(m)
+    edges = np.searchsorted(cum, cum[-1] * np.arange(1, n_nodes) / n_nodes)
+    return [0, *np.unique(np.clip(edges + 1, 1, m.size - 1)).tolist(), m.size]
+
+
+def _cap_bucket_bounds(idx: np.ndarray, m: np.ndarray, n_nodes: int) -> list[int]:
+    """上限ノード用のバケット境界。セル番号 idx (昇順) と質量 m に対し、
+    等質量バケットをさらに次の 2 条件で割る:
+
+    - 幅の上限: 1 バケットの幅は (台の幅 / n_nodes) まで。等質量だけだと密度の
+      薄い所でバケットが横に伸び、代表値 (条件付き平均) から上限が大きくずれる。
+    - 空白を跨がない: 会心/非会心の間のように質量の無い区間が上の幅より広ければ、
+      そこで必ず切る。跨ぐと代表値が「取りえない値」(空白の中) に落ち、そのバケット
+      だけで O(1/N) の誤差になる (docs/accumulate.md §4.6)。
+
+    被積分関数は各バケット内で上限について区分的に滑らかになり、条件付き平均を
+    代表値にすることで 1 次の誤差が消えて O(N^-2) で収束する。
+    """
+    if m.size <= n_nodes:
+        return list(range(m.size + 1))
+    max_span = max(1, int(math.ceil((int(idx[-1]) - int(idx[0])) / n_nodes)))
+    cuts = set(_bucket_bounds(m, n_nodes))
+    cuts.update((np.nonzero(np.diff(idx) > max_span)[0] + 1).tolist())
+    bounds = sorted(cuts)
+    out = [0]
+    for a, b in zip(bounds[:-1], bounds[1:]):
+        # 幅の上限を超えるバケットはセル番号で等幅に割る
+        start = int(idx[a])
+        while int(idx[b - 1]) - start > max_span:
+            k = a + int(np.searchsorted(idx[a:b], start + max_span, side="right"))
+            out.append(k)
+            a, start = k, int(idx[k])
+        out.append(b)
+    return out
+
+
 def _quantize(values: np.ndarray, mass: np.ndarray, n_nodes: int
               ) -> tuple[np.ndarray, np.ndarray]:
     """セル質量を等質量バケットへまとめ、(代表値 = 条件付き平均, 質量) を返す。"""
@@ -207,10 +247,7 @@ def _quantize(values: np.ndarray, mass: np.ndarray, n_nodes: int
     v, m = values[keep], mass[keep]
     if v.size <= n_nodes:
         return v, m
-    cum = np.cumsum(m)
-    total = cum[-1]
-    edges = np.searchsorted(cum, total * np.arange(1, n_nodes) / n_nodes)
-    bounds = [0, *np.unique(np.clip(edges + 1, 1, v.size - 1)), v.size]
+    bounds = _bucket_bounds(m, n_nodes)
     nv, nm = [], []
     for a, b in zip(bounds[:-1], bounds[1:]):
         w = m[a:b].sum()
@@ -224,21 +261,40 @@ def _quantize(values: np.ndarray, mass: np.ndarray, n_nodes: int
 def _cap_nodes_from(cap: CapSpec, src_cells: np.ndarray | None, step: float,
                     n_nodes: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """上限ノード (cap 値, 付随するロール値 x, 確率)。
-    kind="hits" のとき x はその Hit 集合のダメージ合計、それ以外は x = 0。"""
+    kind="hits" のとき x はその Hit 集合のダメージ合計、それ以外は x = 0。
+
+    どちらもセル質量を _cap_buckets で等質量 (+ 幅上限・空白で分割) のバケットに
+    まとめ、代表値は条件付き平均にする (docs/accumulate.md §4.6)。"""
     if cap.kind == "fixed":
         return np.array([float(cap.value)]), np.array([0.0]), np.array([1.0])
     if cap.kind == "mixture":
         mix = cap.mixture or []
         span = max((u.hi for u in mix), default=0.0)
         m = mixture_cells(mix, step, max(2, int(span / step) + 3))
-        v, w = _quantize(np.arange(m.size) * step, m, n_nodes)
+        v, w = _cap_buckets(m, step, n_nodes)
         return v, np.zeros_like(v), w
     if cap.kind in ("hits", "hit"):
         if src_cells is None:
             raise ValueError("上限ロールの Hit 指定が不正です")
-        v, w = _quantize(np.arange(src_cells.size) * step, src_cells, n_nodes)
+        v, w = _cap_buckets(src_cells, step, n_nodes)
         return cap.coef * v, v, w
     raise ValueError(f"未知の CapSpec.kind: {cap.kind}")
+
+
+def _cap_buckets(cells: np.ndarray, step: float, n_nodes: int
+                 ) -> tuple[np.ndarray, np.ndarray]:
+    """上限分布のセル質量を _cap_bucket_bounds で切り、(条件付き平均, 質量) を返す。"""
+    idx = np.nonzero(cells > _TRIM_EPS)[0]
+    m = cells[idx]
+    bounds = _cap_bucket_bounds(idx, m, n_nodes)
+    v, w = [], []
+    for a, b in zip(bounds[:-1], bounds[1:]):
+        mm = m[a:b]
+        tot = float(mm.sum())
+        if tot > 0:
+            v.append(float((mm * idx[a:b]).sum()) * step / tot)
+            w.append(tot)
+    return np.array(v), np.array(w)
 
 
 # =============================================================================
@@ -262,7 +318,7 @@ def _normalize_windows(hit_mixtures, windows: list[AccumWindow]) -> list[AccumWi
         if dup:
             raise ValueError(
                 f"蓄積窓が重なっています (Hit {sorted(dup)})。"
-                "重なりは docs/accumulate.md §3.5 のプール DP が必要で、未対応です。")
+                "重なりは docs/accumulate.md §10.2 のプール DP が必要で、未対応です。")
         seen |= set(w.hits)
         live.append(w)
 
@@ -448,7 +504,7 @@ def _window_cells(w: AccumWindow, base_cells: np.ndarray,
     """窓の寄与 Z_k = S_k + g(mult·min(C_k, α S_k)) のセル質量と診断量。
 
     上限が窓内 Hit 由来なら ψ(x + s)、窓外 Hit 由来なら x + ψ(s) を押し出す
-    (docs/accumulate.md §2.3)。どちらも s について単調なので、基礎分布のセル質量を
+    (docs/accumulate.md §3.2・§10.4)。どちらも s について単調なので、基礎分布のセル質量を
     そのまま写して落とせばよい。
     """
     cap_v, cap_x, cap_w = _cap_nodes_from(w.cap, src_cells, step, n_cap_nodes)
@@ -501,7 +557,7 @@ def _cdf_chunked(dist: SumDist, xs: np.ndarray) -> np.ndarray:
 def pass_prob_quad(hit_mixtures: list[list[Uniform]], win: AccumWindow, D: float, *,
                    burst_decay: bool = False, n_cap_nodes: int = 16,
                    n_panel: int = 400) -> float:
-    """P(T >= D) を docs/accumulate.md §2.1 の 1 次元求積で計算する (K=1 限定)。
+    """P(T >= D) を docs/accumulate.md §3.3 の 1 次元求積で計算する (K=1 限定)。
 
     上限は fixed / mixture のみ (ダメージ列と無相関)。グリッド合成と独立な経路なので、
     裾確率の相互検証に使う。
@@ -615,7 +671,7 @@ def mc_accum(hit_mixtures: list[list[Uniform]], windows: list[AccumWindow],
 
 
 # =============================================================================
-# MC 非依存のモーメント検証 (docs/accumulate.md §6)
+# MC 非依存のモーメント検証 (docs/accumulate.md §7.1)
 # =============================================================================
 
 def min_moments_survival(S: SumDist, cap_mix: list[Uniform] | float, rate: float,

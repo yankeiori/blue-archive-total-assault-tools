@@ -1044,7 +1044,7 @@ def run_restart(n_clicks, D, order, card_indices, param_values, param_ids,
 
     dep_flags = [card_is_hp_dep(c) for c in cards]
     if accum_wins:
-        # 蓄積スキルあり (docs/accumulate.md §4)。チェックポイントが蓄積窓の境界に
+        # 蓄積スキルあり (docs/accumulate.md §6)。チェックポイントが蓄積窓の境界に
         # あれば増分は状態非依存のままなので、区間の増分分布を差し替えるだけで
         # 既存の Dinkelbach + 後ろ向き帰納がそのまま使える。
         if hp_mode == "on" and any(dep_flags):

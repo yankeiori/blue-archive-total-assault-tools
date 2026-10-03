@@ -3,7 +3,7 @@
 正解基準は 4 つ。(1) 窓なし・上限 0 / ∞ の退化で既存の和モデル (build_sum_dist) に
 一致すること、(2) 単調写像の厳密解 1 - F_S(ψ^{-1}(D))、(3) COS の CDF を使う 1 次元
 求積 (pass_prob_quad)、(4) Monte Carlo。さらに E[min(C, αS)] は生存関数積分
-(docs/accumulate.md §6) と突き合わせる。
+(docs/accumulate.md §7.1) と突き合わせる。
 """
 import numpy as np
 import pytest
@@ -11,6 +11,9 @@ import pytest
 from app.backend.accumulate import (
     AccumWindow,
     CapSpec,
+    _cap_nodes_from,
+    _grouped_cf,
+    _real_cells,
     build_accum_dist,
     mc_accum,
     min_moments_survival,
@@ -121,6 +124,40 @@ def test_random_cap_matches_quadrature():
         assert d.pass_prob(D) == pytest.approx(pass_prob_quad(hm, win, D), abs=1e-5)
 
 
+# ---------------------------------------------------------------------------
+# 上限ノードのバケット (docs/accumulate.md §4.6)
+# ---------------------------------------------------------------------------
+def test_cap_nodes_do_not_fall_into_gaps():
+    """会心/非会心で 2 山に分かれる上限ロールでも、代表値が山の間 (取りえない値) に
+    落ちない。等質量だけで切ると 0.76M 付近のノードができ、O(1/N) の誤差になっていた。"""
+    hm = _hm()
+    n, step = 1 << 15, 200.0
+    src = _real_cells(_grouped_cf(hm, [0], step, n), n)   # 非会心 0.45-0.55M / 会心 0.9-1.1M
+    for n_nodes in (4, 16, 64):
+        c, x, w = _cap_nodes_from(CapSpec(kind="hits", hits=[0], coef=2.0), src, step, n_nodes)
+        assert not np.any((x > 0.56e6) & (x < 0.89e6))
+        assert w.sum() == pytest.approx(1.0, abs=1e-9)
+        assert (w * x).sum() == pytest.approx((src * np.arange(n) * step).sum(), rel=1e-9)
+        assert c == pytest.approx(2.0 * x)
+
+
+@pytest.mark.parametrize("inside", [True, False])
+def test_card_cap_converges_in_nodes(inside):
+    """Hit 由来の上限でも、既定の 64 ノードで 1024 ノードの結果と 2e-5 以内。
+    (以前は空白を跨ぐバケットのせいで 7e-4 程度ずれていた)"""
+    hm = _hm()
+    win = (AccumWindow(hits=[0, 1, 2, 3], rate=1.0, cap=CapSpec(kind="hits", hits=[0], coef=4.0))
+           if inside else
+           AccumWindow(hits=[4, 5, 6], rate=1.2,
+                       cap=CapSpec(kind="hits", hits=[0, 1, 2, 3], coef=1.5)))
+    ref = build_accum_dist(hm, [win], n_cap_nodes=1024)
+    d = build_accum_dist(hm, [win])
+    for p in (0.1, 0.5, 0.9, 0.99):
+        D = float(np.interp(p, np.cumsum(ref.mass), ref.centers))
+        assert d.pass_prob(D) == pytest.approx(ref.pass_prob(D), abs=2e-5)
+    assert d.window_stats[0].sat_prob == pytest.approx(ref.window_stats[0].sat_prob, abs=2e-5)
+
+
 @pytest.mark.parametrize("hits", [[0, 1, 2, 3], [1, 2, 3]])
 def test_cap_from_own_roll_matches_mc(hits):
     """上限がスキル自身のダメージロール由来 (窓内 / 窓外の両方)。"""
@@ -185,7 +222,7 @@ def test_pool_mean_matches_survival_integral():
 
 
 def test_even_split_reduces_overflow():
-    """同じ攻撃列でも窓への配分を均すほど溢れが小さい (docs/accumulate.md §3.2)。"""
+    """同じ攻撃列でも窓への配分を均すほど溢れが小さい (docs/accumulate.md §5.2)。"""
     hm = _hm()
     cap = CapSpec(kind="fixed", value=2_000_000)
 
