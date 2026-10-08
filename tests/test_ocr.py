@@ -159,3 +159,34 @@ def test_text_prefix_survives_merging_consecutive_hits():
     assert len(cards) == 1
     assert cards[0]["params"]["hits"] == 3
     assert cards[0]["memo"] == "ミカ2射目 ヒット1 攻撃力10.00% 確定会心"
+
+
+def test_text_scattered_hit_list():
+    """「ヒット1, 3-4, 6」のような飛び飛びのヒット列もヒット数を合算して1枚にする。"""
+    text = """\
+ヒット1, 3-4, 6 (232.87%)
+185,679 - 254,022
+会心
+1,279,125 - 1,749,932
+ヒット2, 5, 7, 9 (381.33%)
+304,060 - 415,975
+会心
+2,094,636 - 2,865,609
+ヒット8, 10-12 (233.21%)
+185,949 - 254,392
+会心
+1,280,986 - 1,752,479
+"""
+    cards = ocr.parse_text(text)["cards"]
+    assert [c["params"]["hits"] for c in cards] == [4, 4, 4]
+    assert [c["memo"] for c in cards] == [
+        "ヒット1,3-4,6 攻撃力232.87%",
+        "ヒット2,5,7,9 攻撃力381.33%",
+        "ヒット8,10-12 攻撃力233.21%",
+    ]
+    p = cards[0]["params"]
+    assert (p["normal_min"], p["normal_max"]) == (185679, 254022)
+    assert (p["crit_min"], p["crit_max"]) == (1279125, 1749932)
+    p = cards[2]["params"]
+    assert (p["normal_min"], p["normal_max"]) == (185949, 254392)
+    assert (p["crit_min"], p["crit_max"]) == (1280986, 1752479)

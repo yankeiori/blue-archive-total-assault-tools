@@ -184,7 +184,10 @@ def group_rows(tokens: list[dict]) -> list[dict]:
 # ---------------------------------------------------------------------------
 # 数値・ヒット解析
 # ---------------------------------------------------------------------------
-_HIT_RE = re.compile(r"ヒット\s*(\d+)\s*(?:[-–~〜]\s*(\d+))?")
+_HIT_SEG = r"\d+(?:\s*[-–~〜]\s*\d+)?"
+# 「ヒット1-2」に加え、飛び飛びの「ヒット1, 3-4, 6」も1つのラベルとして拾う
+_HIT_RE = re.compile(rf"ヒット\s*{_HIT_SEG}(?:\s*[,、]\s*{_HIT_SEG})*")
+_HIT_SEG_RE = re.compile(r"(\d+)(?:\s*[-–~〜]\s*(\d+))?")
 _RANGE_SEP = r"[-–—~〜]"
 # 7,235 - 9,286 / 6,199 / 72,350 ~ 92,860 などにマッチ
 _RANGE_RE = re.compile(
@@ -217,14 +220,20 @@ def _extract_damage(text: str) -> tuple[int, int] | None:
 
 
 def _hit_count(text: str) -> tuple[int, str] | None:
-    """ヒット行ならヒット数とラベルを返す。例 'ヒット2-6' → (5, 'ヒット2-6')。"""
+    """ヒット行ならヒット数とラベルを返す。
+
+    例 'ヒット2-6' → (5, 'ヒット2-6')、'ヒット1, 3-4, 6' → (4, 'ヒット1,3-4,6')。
+    """
     m = _HIT_RE.search(text)
     if not m:
         return None
-    start = int(m.group(1))
-    end = int(m.group(2)) if m.group(2) else start
-    label = m.group(0).replace(" ", "")
-    return (max(1, end - start + 1), label)
+    count = 0
+    for seg in _HIT_SEG_RE.finditer(m.group(0)):
+        start = int(seg.group(1))
+        end = int(seg.group(2)) if seg.group(2) else start
+        count += max(1, end - start + 1)
+    label = re.sub(r"\s+", "", m.group(0))
+    return (count, label)
 
 
 def _is_crit_row(text: str) -> bool:
