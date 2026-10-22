@@ -42,6 +42,9 @@
     "hp_R1",
     "text_input",
     "text_prefix",
+    "text_crit_rate",
+    "text_groups",
+    "text_group_prefix",
     "accum_values",
     "accum_next_index",
     // --- 足切りライン最適化 ---

@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import json
+import re
 
 import dash
 import plotly.graph_objects as go
@@ -20,6 +21,7 @@ from app.frontend.layout import (
     SO_DEFAULT_CARDS,
     SO_MAX_CARDS,
     accum_options,
+    clean_text_groups,
     make_accum_card,
     make_damage_card,
     make_so_constraint,
@@ -29,6 +31,8 @@ from app.frontend.layout import (
     so_skill_options,
     so_slot_options,
     so_target_options,
+    text_group_memo,
+    text_group_options,
 )
 
 # スキル順探索: 解を集める下限件数(表示件数がこれより少なくてもここまでは数える)
@@ -222,7 +226,88 @@ if OCR_ENABLED:
 
 # ---------------------------------------------------------------------------
 # テキスト貼り付け → カード自動生成 (サーバーサイド)
+# 取り込んだカード群は「まとまり」として text-groups に登録し、同じ攻撃を
+# 何度も撃つときに貼り付け直さず再追加できるようにする (layout.clean_text_groups)。
 # ---------------------------------------------------------------------------
+_AUTO_GROUP = re.compile(r"取り込み\d+")
+
+
+def _group_cards(parsed) -> list:
+    """解析結果のカードを、まとまりに保存する形 (params, 名前抜きの備考) へ。"""
+    return clean_text_groups(
+        [{"name": "_", "cards": parsed}])["groups"][0]["cards"]
+
+
+def _register_text_group(store, prefix, cards) -> tuple[dict, dict]:
+    """まとまりを登録し、(新しい store, 登録したまとまり) を返す。
+
+    同じ名前なら「もう一度撃った」とみなして回数を進める。中身が違えば
+    (会心率を変えた等) 新しい方に置き換えるが、回数は引き継ぐ — 1 に戻すと
+    一覧に同じ備考のカードが並んでしまうため。名前 (prefix) が空なら
+    「取り込みN」を割り当てるが、同じ中身の無名のまとまりが既にあればそれを使う。
+    """
+    data = clean_text_groups(store)
+    groups = data["groups"]
+    name = (prefix or "").strip()
+    if not name:
+        same = [g for g in groups
+                if _AUTO_GROUP.fullmatch(g["name"]) and g["cards"] == cards]
+        if same:
+            name = same[0]["name"]
+        else:
+            used = {g["name"] for g in groups}
+            name = next(f"取り込み{k}" for k in range(1, len(groups) + 2)
+                        if f"取り込み{k}" not in used)
+    group = next((g for g in groups if g["name"] == name), None)
+    if group is None:
+        group = {"name": name, "cards": cards, "count": 1}
+        groups.append(group)
+    else:
+        group["cards"] = cards
+        group["count"] += 1
+    data["selected"] = name
+    return data, group
+
+
+def _apply_crit_rate(parsed, crit) -> None:
+    """取り込むカードに共通の会心率を入れる (空欄なら何もしない)。
+
+    確定会心のカードはパーサが会心率 100 を入れているので、そのまま残す。
+    """
+    try:
+        crit = float(crit)
+    except (TypeError, ValueError):
+        return
+    crit = min(max(crit, 0.0), 100.0)
+    for card in parsed:
+        card["params"].setdefault("crit_rate", int(crit) if crit.is_integer() else crit)
+
+
+def _append_group_cards(group, children, indices, next_idx, *, named=True,
+                        prefix=""):
+    """まとまりの count 回目のカードを一覧の末尾に足す。
+
+    named=False は名前を付けずに取り込んだ 1 回目 (備考は従来どおり本体だけ)。
+    prefix を渡すと「名前 #回数」の代わりにそれを備考の頭に付ける。
+    """
+    prefix = (prefix or "").strip()
+    for card in group["cards"]:
+        if prefix:
+            memo = f"{prefix} {card['memo']}".strip()
+        elif named:
+            memo = text_group_memo(group["name"], group["count"], card["memo"])
+        else:
+            memo = card["memo"]
+        children.append(make_damage_card(next_idx, params=card["params"], memo=memo))
+        indices.append(next_idx)
+        next_idx += 1
+    return children, indices, next_idx
+
+
+def _group_label(group) -> str:
+    return group["name"] if group["count"] <= 1 else f"{group['name']} #{group['count']}"
+
+
 @callback(
     Output("cards-container", "children", allow_duplicate=True),
     Output("card-indices", "data", allow_duplicate=True),
@@ -230,41 +315,47 @@ if OCR_ENABLED:
     Output("sorted-indices", "data", allow_duplicate=True),
     Output("text-status", "children"),
     Output("hp-mode", "value", allow_duplicate=True),
+    Output("text-groups", "data", allow_duplicate=True),
     Input("text-import-btn", "n_clicks"),
     State("text-input", "value"),
     State("text-prefix", "value"),
+    State("text-crit-rate", "value"),
     State("cards-container", "children"),
     State("card-indices", "data"),
     State("next-index", "data"),
+    State("text-groups", "data"),
     prevent_initial_call=True,
 )
-def text_add_cards(n_clicks, text, prefix, children, indices, next_idx):
-    """貼り付けテキストを解析し、抽出カードを追加する。
+def text_add_cards(n_clicks, text, prefix, crit, children, indices, next_idx,
+                   groups):
+    """貼り付けテキストを解析し、抽出カードを追加してまとまりに登録する。
 
-    prefix は取り込む全カードの備考の頭に付く (例:「ミカ1射目 ヒット1-10」)。
+    prefix は取り込む全カードの備考の頭に付き (例:「ミカ1射目 ヒット1-10」)、
+    まとまりの名前にもなる。crit は確定会心以外の全カードに入れる会心率 (%)。
+    まとまりには会心率を入れた後の値で登録するので、再追加でも同じ会心率になる。
     """
     if not n_clicks or not (text or "").strip():
         raise PreventUpdate
 
-    no_change = (dash.no_update, dash.no_update, dash.no_update, dash.no_update)
+    no_change = (dash.no_update,) * 4
 
     try:
-        result = ocr.cards_from_text(text, prefix)
+        result = ocr.cards_from_text(text)
     except Exception as exc:  # noqa: BLE001 - 予期せぬ失敗もユーザーに表示
-        return (*no_change, f"⚠ 解析に失敗しました: {exc}", dash.no_update)
+        return (*no_change, f"⚠ 解析に失敗しました: {exc}", dash.no_update, dash.no_update)
 
     parsed = result["cards"]
     if not parsed:
-        return (*no_change, "⚠ カードを検出できませんでした。テキストを確認してください。", dash.no_update)
+        return (*no_change, "⚠ カードを検出できませんでした。テキストを確認してください。",
+                dash.no_update, dash.no_update)
 
-    children = children or []
-    indices = indices or []
-    for card in parsed:
-        children.append(make_damage_card(next_idx, params=card["params"], memo=card["memo"]))
-        indices.append(next_idx)
-        next_idx += 1
+    _apply_crit_rate(parsed, crit)
+    groups, group = _register_text_group(groups, prefix, _group_cards(parsed))
+    named = bool((prefix or "").strip()) or group["count"] > 1
+    children, indices, next_idx = _append_group_cards(
+        group, children or [], indices or [], next_idx, named=named)
 
-    msgs = [f"✅ {len(parsed)} 枚のカードを追加しました。"]
+    msgs = [f"✅ {len(parsed)} 枚のカードを追加しました（まとまり「{_group_label(group)}」）。"]
     hp_mode = dash.no_update
     if result.get("hp_dependent"):
         hp_mode = "on"
@@ -277,7 +368,77 @@ def text_add_cards(n_clicks, text, prefix, children, indices, next_idx):
         _order_from_children(children),
         " ".join(msgs),
         hp_mode,
+        groups,
     )
+
+
+@callback(
+    Output("cards-container", "children", allow_duplicate=True),
+    Output("card-indices", "data", allow_duplicate=True),
+    Output("next-index", "data", allow_duplicate=True),
+    Output("sorted-indices", "data", allow_duplicate=True),
+    Output("text-status", "children", allow_duplicate=True),
+    Output("text-groups", "data", allow_duplicate=True),
+    Input("text-group-add-btn", "n_clicks"),
+    State("text-group-select", "value"),
+    State("text-group-prefix", "value"),
+    State("text-groups", "data"),
+    State("cards-container", "children"),
+    State("card-indices", "data"),
+    State("next-index", "data"),
+    prevent_initial_call=True,
+)
+def text_group_add(n_clicks, name, prefix, groups, children, indices, next_idx):
+    """選んだまとまりのカードを、回数を進めて一覧の末尾にもう一度足す。
+
+    prefix を入れると備考の頭は「名前 #回数」ではなくそれになる (回数は進める)。
+    """
+    if not n_clicks:
+        raise PreventUpdate
+    groups = clean_text_groups(groups)
+    group = next((g for g in groups["groups"] if g["name"] == name), None)
+    if group is None:
+        nu = dash.no_update
+        return nu, nu, nu, nu, "⚠ 再追加するまとまりを選んでください。", nu
+    group["count"] += 1
+    groups["selected"] = name
+    children, indices, next_idx = _append_group_cards(
+        group, children or [], indices or [], next_idx, prefix=prefix)
+    label = (prefix or "").strip() or _group_label(group)
+    return (
+        children, indices, next_idx, _order_from_children(children),
+        f"♻ 「{name}」を「{label}」として {len(group['cards'])} 枚追加しました。",
+        groups,
+    )
+
+
+@callback(
+    Output("text-groups", "data", allow_duplicate=True),
+    Output("text-status", "children", allow_duplicate=True),
+    Input("text-group-remove-btn", "n_clicks"),
+    State("text-group-select", "value"),
+    State("text-groups", "data"),
+    prevent_initial_call=True,
+)
+def text_group_remove(n_clicks, name, groups):
+    """まとまりを登録から外す (追加済みのカードには触らない)。"""
+    if not n_clicks or not name:
+        raise PreventUpdate
+    groups = clean_text_groups(groups)
+    groups["groups"] = [g for g in groups["groups"] if g["name"] != name]
+    groups["selected"] = None
+    return clean_text_groups(groups), f"「{name}」を登録から外しました（カードは残っています）。"
+
+
+@callback(
+    Output("text-group-select", "options"),
+    Output("text-group-select", "value"),
+    Input("text-groups", "data"),
+)
+def text_group_choices(groups):
+    """登録済みのまとまりを選択肢に出し、直前に触ったものを選んでおく。"""
+    groups = clean_text_groups(groups)
+    return text_group_options(groups["groups"]), groups["selected"]
 
 
 # ---------------------------------------------------------------------------
@@ -444,6 +605,7 @@ def _import_accum(rows, options) -> tuple[list, int]:
     State("restart-D", "value"),
     State({"type": "accum", "field": ALL, "index": ALL}, "value"),
     State({"type": "accum", "field": ALL, "index": ALL}, "id"),
+    State("text-groups", "data"),
     prevent_initial_call=True,
 )
 def export_input(n_clicks, order, card_indices, param_values, param_ids,
@@ -451,7 +613,7 @@ def export_input(n_clicks, order, card_indices, param_values, param_ids,
                  save_store, target_damage, gcrit, gevade, gstab, calc_method,
                  damage_mode,
                  hp_mode, hp_H, hp_H1, hp_R0, hp_R1, restart_D,
-                 accum_values, accum_ids):
+                 accum_values, accum_ids, text_groups):
     if not n_clicks:
         raise PreventUpdate
 
@@ -484,6 +646,7 @@ def export_input(n_clicks, order, card_indices, param_values, param_ids,
         "cards": cards,
         "accum": _export_accum(accum_values, accum_ids,
                                {idx: pos for pos, (idx, _p) in enumerate(ordered)}),
+        "text_groups": clean_text_groups(text_groups)["groups"],
         "restart": {"checkpoints": cps, "segment_times": segment_times,
                     "segment_success": segment_success,
                     "save_points": sorted({int(x) for x in (save_store or [])
@@ -518,6 +681,7 @@ def export_input(n_clicks, order, card_indices, param_values, param_ids,
     Output("restart-D", "value"),
     Output("accum-container", "children", allow_duplicate=True),
     Output("accum-next-index", "data", allow_duplicate=True),
+    Output("text-groups", "data", allow_duplicate=True),
     Input("import-upload", "contents"),
     prevent_initial_call=True,
 )
@@ -536,7 +700,7 @@ def import_input(contents):
             raise ValueError("カードが空です。")
     except Exception as exc:  # noqa: BLE001 - 不正ファイルはユーザーに表示
         return (nu, nu, nu, nu, nu, nu, nu, nu, f"⚠ インポート失敗: {exc}",
-                *globals_nu, nu, nu)
+                *globals_nu, nu, nu, nu)
 
     children = []
     total_hits = 0
@@ -570,12 +734,15 @@ def import_input(contents):
     msg = f"✅ {n} 枚のカードと設定を読み込みました。足切りライン最適化の設定も復元済みです。"
     if accum_children:
         msg += f" 蓄積スキル {len(accum_children)} 件も復元しました。"
+    # まとまりを含まない古い JSON なら、今の登録をそのまま残す
+    text_groups = (clean_text_groups(data["text_groups"])
+                   if "text_groups" in data else nu)
     return (
         children, indices, n, indices, cps, seg_times, seg_success, saves, msg,
         gv("target_damage"), gv("global_crit"), gv("global_evade"), gv("global_stability"),
         gv("calc_method"), gv("damage_mode"), gv("hp_mode"),
         gv("hp_H"), gv("hp_H1"), gv("hp_R0"), gv("hp_R1"), gv("restart_D"),
-        accum_children, accum_next,
+        accum_children, accum_next, text_groups,
     )
 
 

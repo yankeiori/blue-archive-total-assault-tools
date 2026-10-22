@@ -437,3 +437,25 @@ def test_clear_all_empties_accum():
 def test_old_snapshot_without_accum_restores_empty():
     state = persist._restored_state(_snapshot())
     assert state["accum"] == [] and state["accum_next_index"] == 0
+
+
+# ---------------------------------------------------------------------------
+# テキスト取り込みのまとまり
+# ---------------------------------------------------------------------------
+def test_restore_keeps_text_groups_and_drops_broken_ones():
+    groups = {"groups": [
+        {"name": "ミカEX", "count": 2,
+         "cards": [{"params": {"hits": 2, "crit_min": 1}, "memo": "ヒット1-2"}]},
+        {"name": "", "count": 1, "cards": [{"params": {}, "memo": ""}]},
+        {"name": "壊れ", "cards": "x"},
+    ], "selected": "ミカEX"}
+    state = persist._restored_state(_snapshot(text_groups=groups))
+    assert state["text_groups"] == {"groups": [groups["groups"][0]],
+                                    "selected": "ミカEX"}
+    # 導入前の保存には無い → 空
+    assert persist._restored_state(_snapshot())["text_groups"]["groups"] == []
+
+
+def test_clear_empties_the_text_groups():
+    comps = _by_id(create_layout())
+    assert persist._cleared_state()["text_groups"] == comps["text-groups"].data

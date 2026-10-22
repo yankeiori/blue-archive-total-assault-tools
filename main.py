@@ -216,6 +216,9 @@ application.clientside_callback(
     Input("hp-R1", "value"),
     Input("text-input", "value"),
     Input("text-prefix", "value"),
+    Input("text-crit-rate", "value"),
+    Input("text-groups", "data"),
+    Input("text-group-prefix", "value"),
     Input({"type": "accum", "field": ALL, "index": ALL}, "value"),
     Input("accum-next-index", "data"),
     # --- 足切りライン最適化 ---

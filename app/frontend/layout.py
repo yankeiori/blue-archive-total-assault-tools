@@ -221,6 +221,60 @@ def make_damage_card(
     )
 
 
+# ---------------------------------------------------------------------------
+# テキスト取り込みのまとまり (同じ攻撃を何度も撃つときに再追加する)
+#
+# dcc.Store(id="text-groups") の中身は {"groups": [...], "selected": 名前}。
+# groups の各要素は {"name": 名前, "cards": [{"params", "memo"}], "count": 回数}。
+# memo は名前を付ける前の本体 (例:「ヒット1-2 攻撃力165.33%」)、count は
+# これまでに追加した回数 (次に足すと #count+1 になる)。
+# ---------------------------------------------------------------------------
+def clean_text_groups(data) -> dict:
+    """保存 / JSON から読んだまとまりを検証して正規化する (壊れた要素は捨てる)。"""
+    groups = data.get("groups") if isinstance(data, dict) else data
+    out = []
+    for g in groups if isinstance(groups, list) else []:
+        if not isinstance(g, dict):
+            continue
+        name = str(g.get("name") or "").strip()
+        # 欠けた項目は make_damage_card の既定値に任せる (None で埋めない)
+        cards = [
+            {"params": {k: v for k, v in c["params"].items() if k in _DEFAULT_PARAMS},
+             "memo": str(c.get("memo") or "")}
+            for c in (g.get("cards") if isinstance(g.get("cards"), list) else [])
+            if isinstance(c, dict) and isinstance(c.get("params"), dict)
+        ]
+        if not name or not cards or any(o["name"] == name for o in out):
+            continue
+        try:
+            count = max(int(g.get("count") or 0), 0)
+        except (TypeError, ValueError):
+            count = 0
+        out.append({"name": name, "cards": cards, "count": count})
+    selected = data.get("selected") if isinstance(data, dict) else None
+    names = [g["name"] for g in out]
+    if selected not in names:
+        selected = names[-1] if names else None
+    return {"groups": out, "selected": selected}
+
+
+def text_group_memo(name: str, n: int, body: str) -> str:
+    """まとまりの n 回目に追加するカードの備考。1 回目は番号を付けない。"""
+    head = name if n <= 1 else f"{name} #{n}"
+    return f"{head} {body}".strip()
+
+
+def text_group_options(groups: list) -> list:
+    """まとまりの選択肢 (例:「ミカEX (3枚・12Hit・2回追加済み)」)。"""
+    opts = []
+    for g in groups or []:
+        hits = sum(int(c["params"].get("hits") or 0) for c in g["cards"])
+        label = f"{g['name']} ({len(g['cards'])}枚・{hits}Hit"
+        label += f"・{g['count']}回追加済み)" if g["count"] else ")"
+        opts.append({"label": label, "value": g["name"]})
+    return opts
+
+
 def _accum_checklist_value(v) -> list:
     """burst_decay (Checklist の list / bool / None) を Checklist の value へ。"""
     if v is None:
@@ -591,6 +645,30 @@ def _text_panel() -> html.Div:
                 ],
                 style={"marginTop": "8px"},
             ),
+            html.Div(
+                [
+                    html.Label(
+                        "会心率 (%) (任意)",
+                        htmlFor="text-crit-rate",
+                        style={"fontSize": "0.8rem", "color": "#555", "display": "block"},
+                    ),
+                    dcc.Input(
+                        id="text-crit-rate",
+                        type="number",
+                        min=0,
+                        max=100,
+                        value=None,
+                        placeholder="空欄: 全体設定の会心率",
+                        # debounce を付けない理由は text-prefix と同じ
+                        style={"width": "100%", "boxSizing": "border-box"},
+                    ),
+                    html.Div(
+                        "取り込む全カードに入れます。確定会心のカード (100%) はそのままです。",
+                        style={"fontSize": "0.75rem", "color": "#888", "marginTop": "2px"},
+                    ),
+                ],
+                style={"marginTop": "8px"},
+            ),
             dcc.Textarea(
                 id="text-input",
                 placeholder=placeholder,
@@ -622,6 +700,73 @@ def _text_panel() -> html.Div:
             html.Div(
                 id="text-status",
                 style={"fontSize": "0.82rem", "color": "#666", "marginTop": "6px", "minHeight": "1.2em"},
+            ),
+            html.Div(
+                [
+                    html.Label(
+                        "♻ 取り込んだまとまりを再追加",
+                        htmlFor="text-group-select",
+                        style={"fontSize": "0.8rem", "color": "#555", "display": "block"},
+                    ),
+                    html.Div(
+                        [
+                            dcc.Dropdown(
+                                id="text-group-select",
+                                options=[],
+                                value=None,
+                                clearable=False,
+                                placeholder="取り込むとここに登録されます",
+                                style={"flex": "1", "minWidth": "0", "fontSize": "0.82rem"},
+                            ),
+                            html.Button(
+                                "✕",
+                                id="text-group-remove-btn",
+                                n_clicks=0,
+                                title="このまとまりを登録から外す (追加済みのカードは残ります)",
+                                style={
+                                    "background": "none", "border": "1px solid #ccc",
+                                    "borderRadius": "6px", "padding": "6px 8px",
+                                    "cursor": "pointer",
+                                },
+                            ),
+                        ],
+                        style={"display": "flex", "gap": "6px", "alignItems": "center",
+                               "marginTop": "2px"},
+                    ),
+                    html.Div(
+                        [
+                            dcc.Input(
+                                id="text-group-prefix",
+                                type="text",
+                                value="",
+                                placeholder="備考の先頭 (空欄: 名前 #回数)",
+                                # debounce を付けない理由は text-prefix と同じ
+                                style={"flex": "1", "minWidth": "0", "boxSizing": "border-box"},
+                            ),
+                            html.Button(
+                                "+ 追加",
+                                id="text-group-add-btn",
+                                n_clicks=0,
+                                title="選んだまとまりのカードを、一覧の末尾にもう一度追加",
+                                style={
+                                    "background": "#7c5cd9", "color": "white",
+                                    "border": "none", "borderRadius": "6px",
+                                    "padding": "6px 10px", "cursor": "pointer",
+                                    "whiteSpace": "nowrap",
+                                },
+                            ),
+                        ],
+                        style={"display": "flex", "gap": "6px", "alignItems": "center",
+                               "marginTop": "6px"},
+                    ),
+                    html.Div(
+                        "「備考の先頭に付ける文字列」を名前に登録します。追加するたびに"
+                        "備考へ #2, #3 … と回数が付きます (先頭を入力すればそれに置き換え)。",
+                        style={"fontSize": "0.75rem", "color": "#888", "marginTop": "2px"},
+                    ),
+                ],
+                style={"marginTop": "10px", "paddingTop": "8px",
+                       "borderTop": "1px dashed #c9bdf0"},
             ),
         ],
         style={
@@ -1577,6 +1722,8 @@ def create_layout() -> html.Div:
             dcc.Store(id="next-index", data=0),
             # 蓄積スキル: 次に割り当てる index
             dcc.Store(id="accum-next-index", data=0),
+            # テキスト取り込みのまとまり (clean_text_groups の形)
+            dcc.Store(id="text-groups", data=clean_text_groups(None)),
             # スニップした画像 (data URL) を JS から受け取る
             dcc.Store(id="ocr-image-store", data=None),
             # 多段リスタ: 選択済みチェックポイント (累積ヒット数のリスト)
