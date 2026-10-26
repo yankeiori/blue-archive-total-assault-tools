@@ -56,12 +56,11 @@ class TestDecay:
         """22M 以上は上限キャップ。"""
         x = np.array([22_000_000, 30_000_000, 100_000_000], dtype=float)
         y = decay(x)
-        np.testing.assert_allclose(y, 10_966_999, atol=1)
+        np.testing.assert_allclose(y, 10_969_999, atol=1)
 
     def test_each_segment_continuity(self):
-        """最終段を除き、各区間の境界で値が連続していることを確認。"""
-        # 最終段 (キャップ) は不連続なのでスキップ
-        for i in range(len(DAMAGE_FUNC) - 2):
+        """キャップ境界を含め、各区間の境界で値が連続していることを確認。"""
+        for i in range(len(DAMAGE_FUNC) - 1):
             (_, x_hi), (a, b) = DAMAGE_FUNC[i]
             (x_lo_next, _), (a_next, b_next) = DAMAGE_FUNC[i + 1]
             y_from_left = a * x_hi + b
@@ -106,10 +105,10 @@ class TestInverseDecay:
         """キャップを超えた y 値では inverse_decay がキャップ境界 x を返す。"""
         # decay の最終段 (a=0) に該当する y はテーブル範囲外として扱われ恒等
         # 実際のゲームでは 22M 以上の生ダメージは cap に張り付く
-        x = inverse_decay(10_966_999)
+        x = inverse_decay(10_969_999)
         # 逆変換後に decay を適用すれば元の値に戻る
         result = decay(np.array([x]))[0]
-        assert result == pytest.approx(10_966_999, abs=100)
+        assert result == pytest.approx(10_969_999, abs=100)
 
 
 # ---------------------------------------------------------------------------

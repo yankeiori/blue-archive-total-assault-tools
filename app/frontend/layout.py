@@ -456,7 +456,7 @@ def make_accum_card(index: int, params: dict | None = None,
                             value=_accum_checklist_value(p.get("burst_decay")),
                             style={"fontSize": "0.85rem", "whiteSpace": "nowrap"},
                         ),
-                        title="爆発ダメージも通常の与ダメージと同じ減衰(上限10,966,999)を"
+                        title="爆発ダメージも通常の与ダメージと同じ減衰(上限10,969,999)を"
                               "受けるならチェック。固定ダメージ扱いなら外してください。",
                         style={"alignSelf": "end", "paddingBottom": "2px"},
                     ),
@@ -966,7 +966,7 @@ def _sidebar() -> html.Div:
                 style={"width": "100%", "marginTop": "6px"},
             ),
             html.Div(
-                "最大ダメージが上限(10,966,999)に張り付く場合のみ使用。最小ダメージと"
+                "最大ダメージが上限(10,969,999)に張り付く場合のみ使用。最小ダメージと"
                 "安定値から最大ダメージを逆算します(未入力なら通常計算)。",
                 style={"fontSize": "0.72rem", "color": "#888", "marginTop": "6px"},
             ),
